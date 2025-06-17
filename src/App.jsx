@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { S3Client, ListBucketsCommand, ListObjectsV2Command, CreateBucketCommand, DeleteBucketCommand, GetObjectCommand, PutObjectCommand, DeleteObjectsCommand } from "@aws-sdk/client-s3";
 import { Upload } from "@aws-sdk/lib-storage";
-import { HardDrive, Folder, File, Plus, Upload as UploadIcon, Download, Trash2, X, ChevronsRight, Loader2, Power, AlertTriangle, CheckCircle, Info, Beaker, Save, Server, Trash, Search } from 'lucide-react';
+import { HardDrive, Folder, File, Plus, Upload as UploadIcon, Download, Trash2, X, ChevronsRight, Loader2, Power, AlertTriangle, CheckCircle, Info, Beaker, Save, Server, Trash, Search, RefreshCw } from 'lucide-react';
 
 // --- Custom Hooks ---
 
@@ -497,10 +497,15 @@ function App() {
                         </div>
                         <div className="flex items-center space-x-2 flex-shrink-0">
                            {selectedBucket && (
+                                <>
+                                <button onClick={() => fetchObjects(selectedBucket, prefix)} disabled={isLoadingObjects} className="p-2 text-slate-400 hover:text-white rounded-full hover:bg-slate-700 transition-colors">
+                                    {isLoadingObjects ? <Loader2 className="animate-spin h-4 w-4"/> : <RefreshCw className="h-4 w-4"/>}
+                                </button>
                                <div className="relative">
                                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-500"/>
                                    <input type="text" placeholder="Search..." value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} className="bg-slate-900 border border-slate-700 rounded-md pl-9 pr-3 py-1.5 text-sm w-48 focus:ring-2 focus:ring-sky-500 focus:border-sky-500 outline-none transition" />
                                </div>
+                               </>
                            )}
                            {selectedItems.length > 0 && (
                                 <button onClick={() => setIsDeleteModalOpen(true)} className="bg-red-600 hover:bg-red-700 text-white font-bold py-1.5 px-3 rounded-md transition-colors cursor-pointer flex items-center space-x-2">
