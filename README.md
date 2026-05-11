@@ -26,7 +26,13 @@ A web-based UI for browsing and managing files and folders in any S3-compatible 
 
   * Download individual files.
 
-  * Delete multiple files and folders (including all their contents) at once.
+  * **Create folders** directly within the current directory.
+
+  * **Rename** files and folders (implemented via copy + delete, since S3 has no native rename).
+
+  * **Delete** individual files and folders (including all nested contents) via per-row context menu or bulk selection.
+
+  * **Move** files and folders via drag & drop onto a target folder.
 
 * **Instant Search:** A search bar to quickly filter items in the current directory.
 
@@ -68,3 +74,73 @@ npm run dev
 ```
 
 Your browser should automatically open to the application, or you can navigate to `http://localhost:5173` (or whichever port is shown in your terminal). You can now connect to your Minio instance and start exploring!
+
+---
+
+## Changelog
+
+### [2026-05-11] — Feature additions
+
+#### `.nvmrc`
+- Added `.nvmrc` with `20` to pin the project to Node.js 20 (LTS). Run `nvm use` in the project root to automatically switch.
+
+#### Create Folder
+- Added a **New Folder** button in the toolbar (visible when a bucket is selected).
+- A modal prompts for the folder name; validation blocks empty names and names containing `/`.
+- Folders are created by uploading an empty object with a key ending in `/` (S3 convention).
+- Pressing `Enter` in the input confirms creation.
+
+#### Rename File / Folder
+- Added a **Rename** action in the per-row context menu.
+- A modal pre-fills the current name for editing.
+- Because S3 has no native rename operation, the implementation:
+  - **Files:** `CopyObjectCommand` to the new key, then `DeleteObjectsCommand` on the old key.
+  - **Folders:** iterates all objects under the old prefix, copies each to the new prefix, then bulk-deletes the originals.
+- Validation blocks empty names, names with `/`, and no-op renames.
+
+#### Delete File / Folder (per-row)
+- Added a **Delete** action (red) in the per-row context menu alongside the existing bulk-delete button.
+- For folders, all nested objects are collected recursively before deletion.
+- Shared helper `collectAllKeysInPrefix` (extracted as `useCallback`) is reused by rename, delete, and move to avoid duplication.
+
+#### Drag & Drop Move
+- Every row is `draggable`.
+- Dragging an item over a **folder** highlights it with a green ring (`ring-emerald-500`) as a drop target.
+- The dragged row becomes semi-transparent (`opacity-40`) during the drag.
+- On drop, `handleMoveItem` runs the same copy-then-delete strategy as rename, adapted for cross-folder moves.
+- A guard prevents moving a folder into itself or into one of its own descendants.
+- A `useRef` (`draggedKeyRef`) is used alongside state to provide a synchronous value inside the `onDrop` closure, avoiding stale-closure bugs.
+
+#### Per-row Context Menu (⋮)
+- Replaced the inline action buttons with a `ContextMenu` component triggered by a **three-dots (⋮)** button.
+- Only one menu can be open at a time (controlled by `openMenuKey` state).
+- The menu closes automatically when clicking anywhere outside it (via a `mousedown` listener on `document`, cleaned up on unmount/close).
+- Menu items: **Download** (files only), **Rename**, **Delete**.
+
+### [2026-05-11] — URL-based navigation with React Router
+
+#### `react-router-dom` integration
+- Installed `react-router-dom` as a dependency.
+- `<App />` wrapped in `<BrowserRouter>` in [src/main.jsx](src/main.jsx).
+- `selectedBucket` and `prefix` state migrated to `useSearchParams` — they are now derived directly from the URL query string rather than component state.
+
+#### URL structure
+| Action | URL |
+|---|---|
+| No bucket selected | `http://localhost:5173/` |
+| Bucket selected | `?bucket=my-bucket` |
+| Inside a folder | `?bucket=my-bucket&prefix=folder/subfolder/` |
+
+#### Browser history
+- Every navigation (bucket click, folder open, breadcrumb click) produces a new history entry via `setSearchParams`.
+- The browser's **back / forward arrows** navigate through the history natively — no custom `popstate` listener needed.
+
+#### Anchor → Button refactor
+- All `<a href="#">` elements used as navigation triggers replaced with `<button>` elements to avoid `#` being appended to the URL and to conform to semantic HTML.
+- Each click now calls a single `setSearchParams({ ... })` with all params at once, preventing double history pushes.
+
+- `collectAllKeysInPrefix` — single responsibility, shared across delete, rename, and move.
+- `handleCreateFolder`, `handleRenameItem`, `handleMoveItem`, `handleDeleteItem` — each wrapped in `useCallback` with explicit dependency arrays.
+- `ContextMenu` — isolated presentational component with its own outside-click effect.
+- Validation is performed at the boundary (before touching the API) in every handler.
+

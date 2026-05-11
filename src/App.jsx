@@ -1,7 +1,8 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { S3Client, ListBucketsCommand, ListObjectsV2Command, CreateBucketCommand, DeleteBucketCommand, GetObjectCommand, PutObjectCommand, DeleteObjectsCommand } from "@aws-sdk/client-s3";
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { useSearchParams } from 'react-router-dom';
+import { S3Client, ListBucketsCommand, ListObjectsV2Command, CreateBucketCommand, DeleteBucketCommand, GetObjectCommand, PutObjectCommand, DeleteObjectsCommand, CopyObjectCommand } from "@aws-sdk/client-s3";
 import { Upload } from "@aws-sdk/lib-storage";
-import { HardDrive, Folder, File, Plus, Upload as UploadIcon, Download, Trash2, X, ChevronsRight, Loader2, Power, AlertTriangle, CheckCircle, Info, Beaker, Save, Server, Trash, Search, RefreshCw } from 'lucide-react';
+import { HardDrive, Folder, File, Plus, Upload as UploadIcon, Download, Trash2, X, ChevronsRight, Loader2, Power, AlertTriangle, CheckCircle, Info, Beaker, Save, Server, Trash, Search, RefreshCw, Pencil, MoreVertical } from 'lucide-react';
 
 // --- Custom Hooks ---
 
@@ -88,6 +89,33 @@ const Modal = ({ isOpen, onClose, title, children }) => {
                 </div>
                 <div className="p-6">{children}</div>
             </div>
+        </div>
+    );
+};
+
+const ContextMenu = ({ isOpen, onClose, items }) => {
+    const ref = useRef(null);
+    useEffect(() => {
+        if (!isOpen) return;
+        const handleClickOutside = (e) => {
+            if (ref.current && !ref.current.contains(e.target)) onClose();
+        };
+        document.addEventListener('mousedown', handleClickOutside);
+        return () => document.removeEventListener('mousedown', handleClickOutside);
+    }, [isOpen, onClose]);
+    if (!isOpen) return null;
+    return (
+        <div ref={ref} className="absolute right-0 top-full mt-1 bg-slate-700 border border-slate-600 rounded-lg shadow-xl z-30 w-44 py-1">
+            {items.map((item, i) => (
+                <button
+                    key={i}
+                    onClick={() => { item.action(); onClose(); }}
+                    className={`w-full text-left px-3 py-2 text-sm flex items-center space-x-2 hover:bg-slate-600 transition-colors ${item.danger ? 'text-red-400 hover:text-red-300' : 'text-slate-200'}`}
+                >
+                    <span className="flex-shrink-0">{item.icon}</span>
+                    <span>{item.label}</span>
+                </button>
+            ))}
         </div>
     );
 };
@@ -250,16 +278,40 @@ const ConnectionManager = ({ onConnect, isConnecting, showAlert }) => {
 };
 
 function App() {
+    const [searchParams, setSearchParams] = useSearchParams();
+    const selectedBucket = searchParams.get('bucket');
+    const prefix = searchParams.get('prefix') ?? '';
+
+    const setSelectedBucket = useCallback((bucket) => {
+        setSearchParams(bucket ? { bucket } : {});
+    }, [setSearchParams]);
+
+    const setPrefix = useCallback((newPrefix) => {
+        setSearchParams(prev => {
+            const next = new URLSearchParams(prev);
+            if (newPrefix) next.set('prefix', newPrefix);
+            else next.delete('prefix');
+            return next;
+        });
+    }, [setSearchParams]);
+
     const [s3Client, setS3Client] = useState(null);
     const [buckets, setBuckets] = useState([]);
-    const [selectedBucket, setSelectedBucket] = useState(null);
     const [objects, setObjects] = useState([]);
-    const [prefix, setPrefix] = useState('');
     const [isLoadingBuckets, setIsLoadingBuckets] = useState(false);
     const [isLoadingObjects, setIsLoadingObjects] = useState(false);
     const [uploadingFiles, setUploadingFiles] = useState([]);
     const [selectedItems, setSelectedItems] = useState([]);
     const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
+    const [isCreateFolderModalOpen, setIsCreateFolderModalOpen] = useState(false);
+    const [newFolderName, setNewFolderName] = useState('');
+    const [isRenameModalOpen, setIsRenameModalOpen] = useState(false);
+    const [renameTarget, setRenameTarget] = useState(null);
+    const [renameValue, setRenameValue] = useState('');
+    const [draggedKey, setDraggedKey] = useState(null);
+    const [dropTargetKey, setDropTargetKey] = useState(null);
+    const [openMenuKey, setOpenMenuKey] = useState(null);
+    const draggedKeyRef = useRef(null);
     const [searchQuery, setSearchQuery] = useState("");
     const [savedConnections, setSavedConnections] = useLocalStorage('minio-connections', []);
     
@@ -296,13 +348,12 @@ function App() {
     const handleDisconnect = useCallback(() => {
         setS3Client(null);
         setBuckets([]);
-        setSelectedBucket(null);
         setObjects([]);
-        setPrefix('');
         setSelectedItems([]);
         setSearchQuery('');
+        setSearchParams({});
         showAlert('Disconnected.', 'info');
-    }, [showAlert]);
+    }, [showAlert, setSearchParams]);
 
     const fetchBuckets = useCallback(async () => {
         if (!s3Client) return;
@@ -408,8 +459,124 @@ function App() {
         }
     };
 
-    const handleDownload = async (key) => {
-        if (!s3Client || !selectedBucket) return;
+    const collectAllKeysInPrefix = useCallback(async (prefixToScan) => {
+        let keys = [];
+        let continuationToken;
+        do {
+            const resp = await s3Client.send(new ListObjectsV2Command({ Bucket: selectedBucket, Prefix: prefixToScan, ContinuationToken: continuationToken }));
+            if (resp.Contents) keys.push(...resp.Contents.map(c => c.Key));
+            continuationToken = resp.NextContinuationToken;
+        } while (continuationToken);
+        return keys;
+    }, [s3Client, selectedBucket]);
+
+    const handleDeleteItem = useCallback(async (key, isFolder) => {
+        const keysToDelete = isFolder ? await collectAllKeysInPrefix(key) : [key];
+        if (keysToDelete.length === 0) { fetchObjects(selectedBucket, prefix); return; }
+        try {
+            await s3Client.send(new DeleteObjectsCommand({ Bucket: selectedBucket, Delete: { Objects: keysToDelete.map(Key => ({ Key })) } }));
+            showAlert('Deleted successfully.', 'success');
+        } catch (error) {
+            showAlert('Failed to delete.', 'error');
+        } finally {
+            fetchObjects(selectedBucket, prefix);
+        }
+    }, [s3Client, selectedBucket, prefix, collectAllKeysInPrefix, showAlert, fetchObjects]);
+
+    const openRenameModal = useCallback((obj) => {
+        const currentName = obj.Key.replace(prefix, '').replace(/\/$/, '');
+        setRenameTarget(obj);
+        setRenameValue(currentName);
+        setIsRenameModalOpen(true);
+    }, [prefix]);
+
+    const handleRenameItem = useCallback(async () => {
+        const trimmedName = renameValue.trim();
+        if (!trimmedName) { showAlert('Name cannot be empty.', 'error'); return; }
+        if (trimmedName.includes('/')) { showAlert('Name cannot contain slashes.', 'error'); return; }
+
+        const isFolder = renameTarget.isFolder;
+        const oldKey = renameTarget.Key;
+        const newKey = isFolder ? `${prefix}${trimmedName}/` : `${prefix}${trimmedName}`;
+
+        if (oldKey === newKey) { setIsRenameModalOpen(false); return; }
+
+        try {
+            if (!isFolder) {
+                await s3Client.send(new CopyObjectCommand({ Bucket: selectedBucket, CopySource: `${selectedBucket}/${oldKey}`, Key: newKey }));
+                await s3Client.send(new DeleteObjectsCommand({ Bucket: selectedBucket, Delete: { Objects: [{ Key: oldKey }] } }));
+            } else {
+                const keys = await collectAllKeysInPrefix(oldKey);
+                for (const k of keys) {
+                    const newObjKey = newKey + k.slice(oldKey.length);
+                    await s3Client.send(new CopyObjectCommand({ Bucket: selectedBucket, CopySource: `${selectedBucket}/${k}`, Key: newObjKey }));
+                }
+                if (keys.length > 0) {
+                    await s3Client.send(new DeleteObjectsCommand({ Bucket: selectedBucket, Delete: { Objects: keys.map(Key => ({ Key })) } }));
+                }
+            }
+            showAlert(`Renamed to "${trimmedName}" successfully.`, 'success');
+            setIsRenameModalOpen(false);
+            fetchObjects(selectedBucket, prefix);
+        } catch (error) {
+            showAlert('Failed to rename.', 'error');
+        }
+    }, [s3Client, selectedBucket, prefix, renameTarget, renameValue, collectAllKeysInPrefix, showAlert, fetchObjects]);
+
+    const handleMoveItem = useCallback(async (sourceKey, targetFolderKey) => {
+        const isFolder = sourceKey.endsWith('/');
+        const parts = sourceKey.replace(/\/$/, '').split('/');
+        const name = parts[parts.length - 1];
+        const newKey = isFolder ? `${targetFolderKey}${name}/` : `${targetFolderKey}${name}`;
+        if (sourceKey === newKey) return;
+        if (newKey.startsWith(sourceKey)) {
+            showAlert('Cannot move a folder into itself.', 'error');
+            return;
+        }
+        try {
+            if (!isFolder) {
+                await s3Client.send(new CopyObjectCommand({ Bucket: selectedBucket, CopySource: `${selectedBucket}/${sourceKey}`, Key: newKey }));
+                await s3Client.send(new DeleteObjectsCommand({ Bucket: selectedBucket, Delete: { Objects: [{ Key: sourceKey }] } }));
+            } else {
+                const keys = await collectAllKeysInPrefix(sourceKey);
+                for (const k of keys) {
+                    const destKey = newKey + k.slice(sourceKey.length);
+                    await s3Client.send(new CopyObjectCommand({ Bucket: selectedBucket, CopySource: `${selectedBucket}/${k}`, Key: destKey }));
+                }
+                if (keys.length > 0) {
+                    await s3Client.send(new DeleteObjectsCommand({ Bucket: selectedBucket, Delete: { Objects: keys.map(Key => ({ Key })) } }));
+                }
+            }
+            showAlert('Moved successfully.', 'success');
+            fetchObjects(selectedBucket, prefix);
+        } catch (error) {
+            showAlert('Failed to move item.', 'error');
+        }
+    }, [s3Client, selectedBucket, prefix, collectAllKeysInPrefix, showAlert, fetchObjects]);
+
+    const handleCreateFolder = useCallback(async () => {
+        const trimmedName = newFolderName.trim();
+        if (!trimmedName) {
+            showAlert('Folder name cannot be empty.', 'error');
+            return;
+        }
+        if (trimmedName.includes('/')) {
+            showAlert('Folder name cannot contain slashes.', 'error');
+            return;
+        }
+        const folderKey = `${prefix}${trimmedName}/`;
+        try {
+            await s3Client.send(new PutObjectCommand({ Bucket: selectedBucket, Key: folderKey, Body: '' }));
+            showAlert(`Folder "${trimmedName}" created successfully.`, 'success');
+            setIsCreateFolderModalOpen(false);
+            setNewFolderName('');
+            fetchObjects(selectedBucket, prefix);
+        } catch (error) {
+            showAlert(`Failed to create folder "${trimmedName}".`, 'error');
+        }
+    }, [s3Client, selectedBucket, prefix, newFolderName, showAlert, fetchObjects]);
+
+    const handleDownload = async (key) => {        if (!s3Client || !selectedBucket) return;
         try {
             const command = new GetObjectCommand({ Bucket: selectedBucket, Key: key });
             const response = await s3Client.send(command);
@@ -476,10 +643,10 @@ function App() {
                         <ul className="space-y-1 overflow-y-auto">
                             {buckets.map(bucket => (
                                 <li key={bucket.Name}>
-                                    <a href="#" onClick={(e) => { e.preventDefault(); setSelectedBucket(bucket.Name); setPrefix(''); }} className={`flex items-center space-x-3 p-2 rounded-md transition-colors w-full text-left ${selectedBucket === bucket.Name ? 'bg-sky-500/20 text-sky-300' : 'hover:bg-slate-700/50'}`}>
+                                    <button onClick={() => setSearchParams({ bucket: bucket.Name })} className={`flex items-center space-x-3 p-2 rounded-md transition-colors w-full text-left ${selectedBucket === bucket.Name ? 'bg-sky-500/20 text-sky-300' : 'hover:bg-slate-700/50'}`}>
                                         <Folder size={18} className={`${selectedBucket === bucket.Name ? 'text-sky-400' : 'text-slate-500'}`} />
                                         <span className="truncate flex-1">{bucket.Name}</span>
-                                    </a>
+                                    </button>
                                 </li>
                             ))}
                         </ul>
@@ -490,7 +657,11 @@ function App() {
                         <div className="flex-grow flex items-center text-sm text-slate-400 overflow-x-auto whitespace-nowrap">
                            {breadcrumbs.map((crumb, i) => (
                              <div key={i} className="flex items-center">
-                               <a href="#" className="hover:text-white" onClick={(e) => { e.preventDefault(); if (i === 0) { setSelectedBucket(null); setPrefix(''); } else if (i === 1) { setPrefix(''); } else { const newPrefix = breadcrumbs.slice(2, i + 1).join('/') + '/'; setPrefix(newPrefix); } }}>{crumb}</a>
+                               <button className="hover:text-white" onClick={() => {
+                                 if (i === 0) { setSearchParams({}); }
+                                 else if (i === 1) { setSearchParams({ bucket: selectedBucket }); }
+                                 else { const newPrefix = breadcrumbs.slice(2, i + 1).join('/') + '/'; setSearchParams({ bucket: selectedBucket, prefix: newPrefix }); }
+                               }}>{crumb}</button>
                                {i < breadcrumbs.length - 1 && <ChevronsRight size={16} className="mx-1 flex-shrink-0" />}
                              </div>
                            ))}
@@ -514,11 +685,17 @@ function App() {
                                 </button>
                            )}
                            {selectedBucket && (
+                               <>
+                               <button onClick={() => { setNewFolderName(''); setIsCreateFolderModalOpen(true); }} className="bg-slate-600 hover:bg-slate-500 text-white font-bold py-1.5 px-3 rounded-md transition-colors flex items-center space-x-2">
+                                   <Plus size={16} />
+                                   <span>New Folder</span>
+                               </button>
                                <label className="bg-sky-600 hover:bg-sky-700 text-white font-bold py-1.5 px-3 rounded-md transition-colors cursor-pointer flex items-center space-x-2">
                                  <UploadIcon size={16} />
                                  <span>Upload</span>
                                  <input type="file" multiple className="hidden" onChange={(e) => handleFileUpload(e.target.files)} />
                                </label>
+                               </>
                            )}
                         </div>
                     </div>
@@ -545,26 +722,70 @@ function App() {
                             </thead>
                             <tbody className="divide-y divide-slate-800">
                                 {filteredObjects.map(obj => (
-                                    <tr key={obj.Key} className={`transition-colors ${selectedItems.includes(obj.Key) ? 'bg-sky-900/50' : 'hover:bg-slate-800/50'}`}>
+                                    <tr
+                                        key={obj.Key}
+                                        draggable
+                                        onDragStart={(e) => {
+                                            e.dataTransfer.effectAllowed = 'move';
+                                            draggedKeyRef.current = obj.Key;
+                                            setDraggedKey(obj.Key);
+                                        }}
+                                        onDragEnd={() => {
+                                            draggedKeyRef.current = null;
+                                            setDraggedKey(null);
+                                            setDropTargetKey(null);
+                                        }}
+                                        onDragOver={obj.isFolder ? (e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; setDropTargetKey(obj.Key); } : undefined}
+                                        onDragLeave={obj.isFolder ? () => setDropTargetKey(prev => prev === obj.Key ? null : prev) : undefined}
+                                        onDrop={obj.isFolder ? (e) => {
+                                            e.preventDefault();
+                                            const src = draggedKeyRef.current;
+                                            if (src && src !== obj.Key && !src.startsWith(obj.Key)) {
+                                                handleMoveItem(src, obj.Key);
+                                            }
+                                            draggedKeyRef.current = null;
+                                            setDraggedKey(null);
+                                            setDropTargetKey(null);
+                                        } : undefined}
+                                        className={[
+                                            'transition-colors cursor-grab active:cursor-grabbing',
+                                            selectedItems.includes(obj.Key) ? 'bg-sky-900/50' : '',
+                                            dropTargetKey === obj.Key ? 'bg-emerald-900/40 ring-1 ring-inset ring-emerald-500' : '',
+                                            !selectedItems.includes(obj.Key) && dropTargetKey !== obj.Key ? 'hover:bg-slate-800/50' : '',
+                                            draggedKey === obj.Key ? 'opacity-40' : '',
+                                        ].join(' ')}
+                                    >
                                         <td className="p-3 text-center">
                                             <input type="checkbox" className="bg-slate-700 border-slate-500 rounded" checked={selectedItems.includes(obj.Key)} onChange={() => {
                                                 setSelectedItems(prev => prev.includes(obj.Key) ? prev.filter(k => k !== obj.Key) : [...prev, obj.Key]);
                                             }} />
                                         </td>
                                         <td className="p-3">
-                                            <a href="#" className="flex items-center space-x-2 group" onClick={(e) => { e.preventDefault(); if(obj.isFolder) setPrefix(obj.Key); }}>
+                                            <button className="flex items-center space-x-2 group w-full text-left" onClick={() => { if(obj.isFolder) setSearchParams({ bucket: selectedBucket, prefix: obj.Key }); }}>
                                                 {obj.isFolder ? <Folder className="text-sky-400" size={20} /> : <File className="text-slate-500" size={20} />}
-                                                <span className={`${obj.isFolder ? 'text-slate-100 group-hover:text-sky-300' : 'text-slate-300'} truncate`}>{obj.Key.replace(prefix, '')}</span>
-                                            </a>
+                                                <span className={`${obj.isFolder ? 'text-slate-100 group-hover:text-sky-300 cursor-pointer' : 'text-slate-300 cursor-default'} truncate`}>{obj.Key.replace(prefix, '')}</span>
+                                            </button>
                                         </td>
                                         <td className="p-3 text-slate-400">{!obj.isFolder && formatBytes(obj.Size)}</td>
                                         <td className="p-3 text-slate-400">{!obj.isFolder && obj.LastModified ? new Date(obj.LastModified).toLocaleString() : ''}</td>
                                         <td className="p-3 text-right">
-                                            {!obj.isFolder && (
-                                                <button onClick={() => handleDownload(obj.Key)} className="p-2 rounded-md hover:bg-slate-700 text-slate-400 hover:text-green-400 transition">
-                                                    <Download size={16} />
+                                            <div className="relative inline-block">
+                                                <button
+                                                    onClick={(e) => { e.stopPropagation(); setOpenMenuKey(prev => prev === obj.Key ? null : obj.Key); }}
+                                                    className="p-2 rounded-md hover:bg-slate-700 text-slate-400 hover:text-white transition"
+                                                >
+                                                    <MoreVertical size={16} />
                                                 </button>
-                                            )}
+                                                <ContextMenu
+                                                    isOpen={openMenuKey === obj.Key}
+                                                    onClose={() => setOpenMenuKey(null)}
+                                                    items={[
+                                                        ...(!obj.isFolder ? [{ icon: <Download size={14}/>, label: 'Download', action: () => handleDownload(obj.Key) }] : []),
+                                                        { icon: <Pencil size={14}/>, label: 'Rename', action: () => openRenameModal(obj) },
+                                                        { icon: <Trash2 size={14}/>, label: 'Delete', action: () => handleDeleteItem(obj.Key, obj.isFolder), danger: true },
+                                                    ]}
+                                                />
+                                            </div>
                                         </td>
                                     </tr>
                                 ))}
@@ -574,6 +795,45 @@ function App() {
                      </div>
                 </main>
             </div>
+            <Modal isOpen={isRenameModalOpen} onClose={() => setIsRenameModalOpen(false)} title="Rename">
+                <div className="space-y-4">
+                    <div>
+                        <label className="text-sm font-medium text-slate-300 block mb-2">New Name</label>
+                        <input
+                            type="text"
+                            value={renameValue}
+                            onChange={(e) => setRenameValue(e.target.value)}
+                            onKeyDown={(e) => e.key === 'Enter' && handleRenameItem()}
+                            autoFocus
+                            className="w-full bg-slate-900 border border-slate-600 rounded-md px-3 py-2 text-slate-200 focus:ring-2 focus:ring-sky-500 focus:border-sky-500 outline-none transition"
+                        />
+                    </div>
+                    <div className="flex justify-end space-x-3 pt-2">
+                        <button type="button" onClick={() => setIsRenameModalOpen(false)} className="px-4 py-2 rounded-md bg-slate-700 hover:bg-slate-600 text-slate-100 font-semibold transition">Cancel</button>
+                        <button type="button" onClick={handleRenameItem} className="px-4 py-2 rounded-md bg-sky-600 hover:bg-sky-700 text-white font-semibold transition">Rename</button>
+                    </div>
+                </div>
+            </Modal>
+            <Modal isOpen={isCreateFolderModalOpen} onClose={() => setIsCreateFolderModalOpen(false)} title="Create New Folder">
+                <div className="space-y-4">
+                    <div>
+                        <label className="text-sm font-medium text-slate-300 block mb-2">Folder Name</label>
+                        <input
+                            type="text"
+                            value={newFolderName}
+                            onChange={(e) => setNewFolderName(e.target.value)}
+                            onKeyDown={(e) => e.key === 'Enter' && handleCreateFolder()}
+                            placeholder="e.g., my-folder"
+                            autoFocus
+                            className="w-full bg-slate-900 border border-slate-600 rounded-md px-3 py-2 text-slate-200 focus:ring-2 focus:ring-sky-500 focus:border-sky-500 outline-none transition"
+                        />
+                    </div>
+                    <div className="flex justify-end space-x-3 pt-2">
+                        <button type="button" onClick={() => setIsCreateFolderModalOpen(false)} className="px-4 py-2 rounded-md bg-slate-700 hover:bg-slate-600 text-slate-100 font-semibold transition">Cancel</button>
+                        <button type="button" onClick={handleCreateFolder} className="px-4 py-2 rounded-md bg-sky-600 hover:bg-sky-700 text-white font-semibold transition">Create</button>
+                    </div>
+                </div>
+            </Modal>
             <Modal isOpen={isDeleteModalOpen} onClose={() => setIsDeleteModalOpen(false)} title="Confirm Deletion">
                 <div className="text-slate-300">
                     <p className="mb-4">Are you sure you want to permanently delete {selectedItems.length} item(s)? This action cannot be undone.</p>
