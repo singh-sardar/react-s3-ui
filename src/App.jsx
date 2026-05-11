@@ -2,7 +2,10 @@ import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useSearchParams } from 'react-router-dom';
 import { S3Client, ListBucketsCommand, ListObjectsV2Command, CreateBucketCommand, DeleteBucketCommand, GetObjectCommand, PutObjectCommand, DeleteObjectsCommand, CopyObjectCommand } from "@aws-sdk/client-s3";
 import { Upload } from "@aws-sdk/lib-storage";
-import { HardDrive, Folder, File, Plus, Upload as UploadIcon, Download, Trash2, X, ChevronsRight, Loader2, Power, AlertTriangle, CheckCircle, Info, Beaker, Save, Server, Trash, Search, RefreshCw, Pencil, MoreVertical } from 'lucide-react';
+import { HardDrive, Folder, File, Plus, Upload as UploadIcon, Download, Trash2, X, ChevronsRight, Loader2, Power, AlertTriangle, CheckCircle, Info, Beaker, Save, Server, Trash, Search, RefreshCw, Pencil, Eye, Copy, MoreVertical } from 'lucide-react';
+import { getPreviewType, getPublicUrl } from './utils/fileUtils';
+import { useFilePreview } from './hooks/useFilePreview';
+import FilePreviewModal from './components/FilePreviewModal';
 
 // --- Custom Hooks ---
 
@@ -314,6 +317,7 @@ function App() {
     const draggedKeyRef = useRef(null);
     const [searchQuery, setSearchQuery] = useState("");
     const [savedConnections, setSavedConnections] = useLocalStorage('minio-connections', []);
+    const [connectionEndpoint, setConnectionEndpoint] = useState(null);
     
     const { alertData, showAlert, hideAlert } = useAlert();
 
@@ -340,6 +344,7 @@ function App() {
             }
 
             setS3Client(client);
+            setConnectionEndpoint(connectionDetails.endpoint);
         } catch (error) {
             showAlert(`Connection failed: ${error.name}.`, 'error');
         }
@@ -347,6 +352,7 @@ function App() {
 
     const handleDisconnect = useCallback(() => {
         setS3Client(null);
+        setConnectionEndpoint(null);
         setBuckets([]);
         setObjects([]);
         setSelectedItems([]);
@@ -596,6 +602,18 @@ function App() {
             showAlert(`Failed to download "${key}".`, 'error');
         }
     };
+
+    const { previewItem, previewObjectUrl, isLoadingPreview, openPreview, closePreview } = useFilePreview(s3Client, selectedBucket, showAlert);
+
+    const handleCopyPublicUrl = useCallback(async (key) => {
+        const url = getPublicUrl(connectionEndpoint, selectedBucket, key);
+        try {
+            await navigator.clipboard.writeText(url);
+            showAlert('Public URL copied to clipboard.', 'success');
+        } catch (err) {
+            showAlert('Failed to copy URL.', 'error');
+        }
+    }, [connectionEndpoint, selectedBucket, showAlert]);
     
     useEffect(() => {
         if (s3Client) fetchBuckets();
@@ -781,6 +799,8 @@ function App() {
                                                     onClose={() => setOpenMenuKey(null)}
                                                     items={[
                                                         ...(!obj.isFolder ? [{ icon: <Download size={14}/>, label: 'Download', action: () => handleDownload(obj.Key) }] : []),
+                                                        ...(!obj.isFolder && getPreviewType(obj.Key) ? [{ icon: <Eye size={14}/>, label: 'Preview', action: () => openPreview(obj.Key) }] : []),
+                                                        ...(!obj.isFolder ? [{ icon: <Copy size={14}/>, label: 'Copy Public URL', action: () => handleCopyPublicUrl(obj.Key) }] : []),
                                                         { icon: <Pencil size={14}/>, label: 'Rename', action: () => openRenameModal(obj) },
                                                         { icon: <Trash2 size={14}/>, label: 'Delete', action: () => handleDeleteItem(obj.Key, obj.isFolder), danger: true },
                                                     ]}
@@ -846,6 +866,7 @@ function App() {
                     </div>
                 </div>
             </Modal>
+            <FilePreviewModal item={previewItem} objectUrl={previewObjectUrl} isLoading={isLoadingPreview} onClose={closePreview} />
         </div>
     );
 }
