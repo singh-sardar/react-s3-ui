@@ -454,8 +454,7 @@ function App() {
         }
 
         try {
-            const deleteCommand = new DeleteObjectsCommand({ Bucket: selectedBucket, Delete: { Objects: allKeysToDelete.map(Key => ({ Key })) } });
-            await s3Client.send(deleteCommand);
+            await batchDeleteKeys(allKeysToDelete);
             showAlert(`${allKeysToDelete.length} item(s) deleted successfully.`, 'success');
         } catch (error) {
             showAlert('Failed to delete items.', 'error');
@@ -476,18 +475,30 @@ function App() {
         return keys;
     }, [s3Client, selectedBucket]);
 
+    const batchDeleteKeys = useCallback(async (keys) => {
+        // S3 DeleteObjectsCommand supports max 1000 objects per request
+        const BATCH_SIZE = 1000;
+        for (let i = 0; i < keys.length; i += BATCH_SIZE) {
+            const batch = keys.slice(i, i + BATCH_SIZE);
+            await s3Client.send(new DeleteObjectsCommand({ 
+                Bucket: selectedBucket, 
+                Delete: { Objects: batch.map(Key => ({ Key })) } 
+            }));
+        }
+    }, [s3Client, selectedBucket]);
+
     const handleDeleteItem = useCallback(async (key, isFolder) => {
         const keysToDelete = isFolder ? await collectAllKeysInPrefix(key) : [key];
         if (keysToDelete.length === 0) { fetchObjects(selectedBucket, prefix); return; }
         try {
-            await s3Client.send(new DeleteObjectsCommand({ Bucket: selectedBucket, Delete: { Objects: keysToDelete.map(Key => ({ Key })) } }));
+            await batchDeleteKeys(keysToDelete);
             showAlert('Deleted successfully.', 'success');
         } catch (error) {
             showAlert('Failed to delete.', 'error');
         } finally {
             fetchObjects(selectedBucket, prefix);
         }
-    }, [s3Client, selectedBucket, prefix, collectAllKeysInPrefix, showAlert, fetchObjects]);
+    }, [selectedBucket, prefix, collectAllKeysInPrefix, batchDeleteKeys, showAlert, fetchObjects]);
 
     const openRenameModal = useCallback((obj) => {
         const currentName = obj.Key.replace(prefix, '').replace(/\/$/, '');
@@ -518,7 +529,7 @@ function App() {
                     await s3Client.send(new CopyObjectCommand({ Bucket: selectedBucket, CopySource: encodeCopySource(selectedBucket, k), Key: newObjKey }));
                 }
                 if (keys.length > 0) {
-                    await s3Client.send(new DeleteObjectsCommand({ Bucket: selectedBucket, Delete: { Objects: keys.map(Key => ({ Key })) } }));
+                    await batchDeleteKeys(keys);
                 }
             }
             showAlert(`Renamed to "${trimmedName}" successfully.`, 'success');
@@ -527,7 +538,7 @@ function App() {
         } catch (error) {
             showAlert('Failed to rename.', 'error');
         }
-    }, [s3Client, selectedBucket, prefix, renameTarget, renameValue, collectAllKeysInPrefix, showAlert, fetchObjects]);
+    }, [s3Client, selectedBucket, prefix, renameTarget, renameValue, collectAllKeysInPrefix, batchDeleteKeys, showAlert, fetchObjects]);
 
     const handleMoveItem = useCallback(async (sourceKey, targetFolderKey) => {
         const isFolder = sourceKey.endsWith('/');
@@ -550,7 +561,7 @@ function App() {
                     await s3Client.send(new CopyObjectCommand({ Bucket: selectedBucket, CopySource: encodeCopySource(selectedBucket, k), Key: destKey }));
                 }
                 if (keys.length > 0) {
-                    await s3Client.send(new DeleteObjectsCommand({ Bucket: selectedBucket, Delete: { Objects: keys.map(Key => ({ Key })) } }));
+                    await batchDeleteKeys(keys);
                 }
             }
             showAlert('Moved successfully.', 'success');
@@ -558,7 +569,7 @@ function App() {
         } catch (error) {
             showAlert('Failed to move item.', 'error');
         }
-    }, [s3Client, selectedBucket, prefix, collectAllKeysInPrefix, showAlert, fetchObjects]);
+    }, [s3Client, selectedBucket, prefix, collectAllKeysInPrefix, batchDeleteKeys, showAlert, fetchObjects]);
 
     const handleCreateFolder = useCallback(async () => {
         const trimmedName = newFolderName.trim();
