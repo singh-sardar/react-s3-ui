@@ -28,6 +28,7 @@ const FilePreviewModal = ({ item, objectUrl, isLoading, onClose }) => {
                     <button
                         onClick={onClose}
                         className="ml-4 text-slate-400 hover:text-white p-1 rounded-full hover:bg-slate-700 flex-shrink-0"
+                        aria-label="Close preview"
                     >
                         <X size={20} />
                     </button>
