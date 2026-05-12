@@ -127,6 +127,7 @@ const ContextMenu = ({ isOpen, onClose, items }) => {
 
 const ConnectionManager = ({ onConnect, isConnecting, showAlert }) => {
     const [endpoint, setEndpoint] = useState('http://127.0.0.1:9000');
+    const [publicEndpoint, setPublicEndpoint] = useState('');
     const [accessKey, setAccessKey] = useState('minioadmin');
     const [secretKey, setSecretKey] = useState('minioadmin');
     const [showSecret, setShowSecret] = useState(false);
@@ -162,7 +163,7 @@ const ConnectionManager = ({ onConnect, isConnecting, showAlert }) => {
     };
 
     const handleQuickConnect = (conn) => {
-        const connectionDetails = { endpoint: conn.endpoint, accessKey: conn.accessKey, secretKey: conn.secretKey };
+        const connectionDetails = { endpoint: conn.endpoint, publicEndpoint: conn.publicEndpoint, accessKey: conn.accessKey, secretKey: conn.secretKey };
         onConnect(connectionDetails, false);
     };
 
@@ -173,6 +174,7 @@ const ConnectionManager = ({ onConnect, isConnecting, showAlert }) => {
     
     const handleLoadConnection = (conn) => {
         setEndpoint(conn.endpoint);
+        setPublicEndpoint(conn.publicEndpoint || '');
         setAccessKey(conn.accessKey);
         setSecretKey(conn.secretKey);
         setConnectionName(conn.name);
@@ -181,7 +183,7 @@ const ConnectionManager = ({ onConnect, isConnecting, showAlert }) => {
 
     const handleSubmit = async (e) => {
         e.preventDefault();
-        const connectionDetails = { endpoint, accessKey, secretKey };
+        const connectionDetails = { endpoint, publicEndpoint: publicEndpoint || endpoint, accessKey, secretKey };
         
         if (saveConnection && !connectionName.trim()) {
             showAlert('Please enter a name for the connection to save it.', 'error');
@@ -231,6 +233,11 @@ const ConnectionManager = ({ onConnect, isConnecting, showAlert }) => {
                         <div>
                             <label className="text-sm font-medium text-slate-300 block mb-2">Endpoint URL</label>
                             <input type="text" value={endpoint} onChange={(e) => setEndpoint(e.target.value)} placeholder="e.g., http://localhost:9000" className="w-full bg-slate-900 border border-slate-600 rounded-md px-3 py-2 text-slate-200 focus:ring-2 focus:ring-sky-500 focus:border-sky-500 outline-none transition" required />
+                        </div>
+                        <div>
+                            <label className="text-sm font-medium text-slate-300 block mb-2">Public Endpoint URL (optional)</label>
+                            <input type="text" value={publicEndpoint} onChange={(e) => setPublicEndpoint(e.target.value)} placeholder="e.g., https://s3.develon.com" className="w-full bg-slate-900 border border-slate-600 rounded-md px-3 py-2 text-slate-200 focus:ring-2 focus:ring-sky-500 focus:border-sky-500 outline-none transition" />
+                            <p className="text-xs text-slate-500 mt-1">Leave empty to use the endpoint URL</p>
                         </div>
                         <div>
                             <label className="text-sm font-medium text-slate-300 block mb-2">Access Key ID</label>
@@ -318,6 +325,7 @@ function App() {
     const [searchQuery, setSearchQuery] = useState("");
     const [savedConnections, setSavedConnections] = useLocalStorage('minio-connections', []);
     const [connectionEndpoint, setConnectionEndpoint] = useState(null);
+    const [publicEndpoint, setPublicEndpoint] = useState(null);
     
     const { alertData, showAlert, hideAlert } = useAlert();
 
@@ -345,6 +353,7 @@ function App() {
 
             setS3Client(client);
             setConnectionEndpoint(connectionDetails.endpoint);
+            setPublicEndpoint(connectionDetails.publicEndpoint || connectionDetails.endpoint);
         } catch (error) {
             showAlert(`Connection failed: ${error.name}.`, 'error');
         }
@@ -353,6 +362,7 @@ function App() {
     const handleDisconnect = useCallback(() => {
         setS3Client(null);
         setConnectionEndpoint(null);
+        setPublicEndpoint(null);
         setBuckets([]);
         setObjects([]);
         setSelectedItems([]);
@@ -617,14 +627,14 @@ function App() {
     const { previewItem, previewObjectUrl, isLoadingPreview, openPreview, closePreview } = useFilePreview(s3Client, selectedBucket, showAlert);
 
     const handleCopyPublicUrl = useCallback(async (key) => {
-        const url = getPublicUrl(connectionEndpoint, selectedBucket, key);
+        const url = getPublicUrl(publicEndpoint, selectedBucket, key);
         try {
             await navigator.clipboard.writeText(url);
             showAlert('Public URL copied to clipboard.', 'success');
         } catch (err) {
             showAlert('Failed to copy URL.', 'error');
         }
-    }, [connectionEndpoint, selectedBucket, showAlert]);
+    }, [publicEndpoint, selectedBucket, showAlert]);
     
     useEffect(() => {
         if (s3Client) fetchBuckets();
