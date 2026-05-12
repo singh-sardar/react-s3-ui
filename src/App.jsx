@@ -535,7 +535,7 @@ function App() {
         const name = parts[parts.length - 1];
         const newKey = isFolder ? `${targetFolderKey}${name}/` : `${targetFolderKey}${name}`;
         if (sourceKey === newKey) return;
-        if (newKey.startsWith(sourceKey)) {
+        if (isFolder && newKey.startsWith(sourceKey)) {
             showAlert('Cannot move a folder into itself.', 'error');
             return;
         }
