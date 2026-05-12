@@ -3,7 +3,7 @@ import { useSearchParams } from 'react-router-dom';
 import { S3Client, ListBucketsCommand, ListObjectsV2Command, CreateBucketCommand, DeleteBucketCommand, GetObjectCommand, PutObjectCommand, DeleteObjectsCommand, CopyObjectCommand } from "@aws-sdk/client-s3";
 import { Upload } from "@aws-sdk/lib-storage";
 import { HardDrive, Folder, File, Plus, Upload as UploadIcon, Download, Trash2, X, ChevronsRight, Loader2, Power, AlertTriangle, CheckCircle, Info, Beaker, Save, Server, Trash, Search, RefreshCw, Pencil, Eye, Copy, MoreVertical } from 'lucide-react';
-import { getPreviewType, getPublicUrl } from './utils/fileUtils';
+import { getPreviewType, getPublicUrl, encodeCopySource } from './utils/fileUtils';
 import { useFilePreview } from './hooks/useFilePreview';
 import FilePreviewModal from './components/FilePreviewModal';
 
@@ -509,13 +509,13 @@ function App() {
 
         try {
             if (!isFolder) {
-                await s3Client.send(new CopyObjectCommand({ Bucket: selectedBucket, CopySource: `${selectedBucket}/${oldKey}`, Key: newKey }));
+                await s3Client.send(new CopyObjectCommand({ Bucket: selectedBucket, CopySource: encodeCopySource(selectedBucket, oldKey), Key: newKey }));
                 await s3Client.send(new DeleteObjectsCommand({ Bucket: selectedBucket, Delete: { Objects: [{ Key: oldKey }] } }));
             } else {
                 const keys = await collectAllKeysInPrefix(oldKey);
                 for (const k of keys) {
                     const newObjKey = newKey + k.slice(oldKey.length);
-                    await s3Client.send(new CopyObjectCommand({ Bucket: selectedBucket, CopySource: `${selectedBucket}/${k}`, Key: newObjKey }));
+                    await s3Client.send(new CopyObjectCommand({ Bucket: selectedBucket, CopySource: encodeCopySource(selectedBucket, k), Key: newObjKey }));
                 }
                 if (keys.length > 0) {
                     await s3Client.send(new DeleteObjectsCommand({ Bucket: selectedBucket, Delete: { Objects: keys.map(Key => ({ Key })) } }));
@@ -541,13 +541,13 @@ function App() {
         }
         try {
             if (!isFolder) {
-                await s3Client.send(new CopyObjectCommand({ Bucket: selectedBucket, CopySource: `${selectedBucket}/${sourceKey}`, Key: newKey }));
+                await s3Client.send(new CopyObjectCommand({ Bucket: selectedBucket, CopySource: encodeCopySource(selectedBucket, sourceKey), Key: newKey }));
                 await s3Client.send(new DeleteObjectsCommand({ Bucket: selectedBucket, Delete: { Objects: [{ Key: sourceKey }] } }));
             } else {
                 const keys = await collectAllKeysInPrefix(sourceKey);
                 for (const k of keys) {
                     const destKey = newKey + k.slice(sourceKey.length);
-                    await s3Client.send(new CopyObjectCommand({ Bucket: selectedBucket, CopySource: `${selectedBucket}/${k}`, Key: destKey }));
+                    await s3Client.send(new CopyObjectCommand({ Bucket: selectedBucket, CopySource: encodeCopySource(selectedBucket, k), Key: destKey }));
                 }
                 if (keys.length > 0) {
                     await s3Client.send(new DeleteObjectsCommand({ Bucket: selectedBucket, Delete: { Objects: keys.map(Key => ({ Key })) } }));

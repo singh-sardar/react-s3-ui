@@ -52,3 +52,23 @@ export function getMimeType(key) {
 export function getPublicUrl(endpoint, bucket, key) {
     return `${endpoint.replace(/\/$/, '')}/${bucket}/${key}`;
 }
+
+/**
+ * URL-encodes an S3 key while preserving forward slashes.
+ * This is needed for keys containing spaces, unicode, or reserved characters.
+ * @param {string} key
+ * @returns {string}
+ */
+export function encodeS3Key(key) {
+    return key.split('/').map(segment => encodeURIComponent(segment)).join('/');
+}
+
+/**
+ * Creates a properly encoded CopySource string for S3 CopyObjectCommand.
+ * @param {string} bucket
+ * @param {string} key
+ * @returns {string}
+ */
+export function encodeCopySource(bucket, key) {
+    return `${encodeURIComponent(bucket)}/${encodeS3Key(key)}`;
+}
