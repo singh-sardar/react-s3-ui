@@ -51,6 +51,7 @@ const FilePreviewModal = ({ item, objectUrl, isLoading, onClose }) => {
                             src={objectUrl}
                             title={fileName}
                             className="w-full h-full border-0"
+                            sandbox="allow-same-origin"
                         />
                     ) : null}
                 </div>
