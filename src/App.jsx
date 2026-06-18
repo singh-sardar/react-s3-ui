@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useSearchParams } from 'react-router-dom';
 import { S3Client, ListBucketsCommand, ListObjectsV2Command, CreateBucketCommand, DeleteBucketCommand, GetObjectCommand, PutObjectCommand, DeleteObjectsCommand, CopyObjectCommand } from "@aws-sdk/client-s3";
 import { Upload } from "@aws-sdk/lib-storage";
-import { HardDrive, Folder, File, Plus, Upload as UploadIcon, FolderUp, Download, Trash2, X, ChevronsRight, Loader2, Power, AlertTriangle, CheckCircle, Info, Beaker, Save, Server, Trash, Search, RefreshCw, Pencil, Eye, Copy, MoreVertical } from 'lucide-react';
+import { HardDrive, Folder, File, Plus, Upload as UploadIcon, FolderUp, Download, Trash2, X, ChevronsRight, ChevronRight, Loader2, Power, AlertTriangle, CheckCircle, Info, Beaker, Save, Server, Trash, Search, RefreshCw, Pencil, Eye, Copy, MoreVertical } from 'lucide-react';
 import { getPreviewType, getPublicUrl, encodeCopySource, getEntriesFromDataTransfer } from './utils/fileUtils';
 import { useFilePreview } from './hooks/useFilePreview';
 import FilePreviewModal from './components/FilePreviewModal';
@@ -120,6 +120,59 @@ const ContextMenu = ({ isOpen, onClose, items }) => {
                 </button>
             ))}
         </div>
+    );
+};
+
+// Recursive Finder-style tree node for the sidebar. Buckets are roots (prefix
+// ''); folders are nested nodes. All shared state/handlers come through `ctx`.
+const TreeNode = ({ ctx, bucket, nodePrefix, label, depth, isBucket }) => {
+    const id = `${bucket}\u0000${nodePrefix}`;
+    const isExpanded = !!ctx.expandedNodes[id];
+    const isLoading = !!ctx.loadingNodes[id];
+    const children = ctx.treeChildren[id];
+    const isActive = ctx.selectedBucket === bucket && ctx.currentPrefix === nodePrefix;
+    const isDropTarget = ctx.treeDropTarget === id;
+
+    return (
+        <li>
+            <div
+                style={{ paddingLeft: `${depth * 14 + 4}px` }}
+                onDragOver={(e) => ctx.onNodeDragOver(e, id)}
+                onDragLeave={() => ctx.onNodeDragLeave(id)}
+                onDrop={(e) => ctx.onNodeDrop(e, bucket, nodePrefix)}
+                className={[
+                    'flex items-center rounded-md transition-colors group',
+                    isActive ? 'bg-sky-500/20 text-sky-300' : 'hover:bg-slate-700/50',
+                    isDropTarget ? 'ring-1 ring-inset ring-emerald-500 bg-emerald-900/40' : '',
+                ].join(' ')}
+            >
+                <button
+                    onClick={() => ctx.onToggle(bucket, nodePrefix)}
+                    className="p-1 text-slate-500 hover:text-slate-200 flex-shrink-0"
+                    aria-label={isExpanded ? 'Collapse' : 'Expand'}
+                >
+                    {isLoading
+                        ? <Loader2 size={14} className="animate-spin" />
+                        : <ChevronRight size={14} className={`transition-transform ${isExpanded ? 'rotate-90' : ''}`} />}
+                </button>
+                <button
+                    onClick={() => ctx.onNavigate(bucket, nodePrefix)}
+                    className="flex items-center space-x-2 py-1.5 pr-2 flex-1 min-w-0 text-left"
+                >
+                    {isBucket
+                        ? <HardDrive size={16} className={isActive ? 'text-sky-400' : 'text-slate-500'} />
+                        : <Folder size={16} className={isActive ? 'text-sky-400' : 'text-slate-500'} />}
+                    <span className="truncate">{label}</span>
+                </button>
+            </div>
+            {isExpanded && children && children.length > 0 && (
+                <ul>
+                    {children.map(c => (
+                        <TreeNode key={c.key} ctx={ctx} bucket={bucket} nodePrefix={c.key} label={c.name} depth={depth + 1} isBucket={false} />
+                    ))}
+                </ul>
+            )}
+        </li>
     );
 };
 
@@ -322,8 +375,14 @@ function App() {
     const [dropTargetKey, setDropTargetKey] = useState(null);
     const [openMenuKey, setOpenMenuKey] = useState(null);
     const [isDraggingFiles, setIsDraggingFiles] = useState(false);
+    const [expandedNodes, setExpandedNodes] = useState({});
+    const [treeChildren, setTreeChildren] = useState({});
+    const [loadingNodes, setLoadingNodes] = useState({});
+    const [treeDropTarget, setTreeDropTarget] = useState(null);
     const draggedKeyRef = useRef(null);
     const dragCounter = useRef(0);
+    const treeChildrenRef = useRef({});
+    const loadingNodesRef = useRef({});
     const [searchQuery, setSearchQuery] = useState("");
     const [savedConnections, setSavedConnections] = useLocalStorage('minio-connections', []);
     const [connectionEndpoint, setConnectionEndpoint] = useState(null);
@@ -404,10 +463,75 @@ function App() {
         }
     }, [s3Client, showAlert]);
 
-    // Uploads a flat list of { file, path } entries. `path` is relative to the
-    // current prefix and may contain slashes, preserving folder structure.
-    const uploadEntries = useCallback(async (entries) => {
-        if (!s3Client || !selectedBucket || !entries.length) return;
+    // --- Sidebar folder tree (Finder-style) ---
+    // A node is identified by `${bucket} ${prefix}`; prefix '' is the bucket root.
+    // We keep refs mirroring the children/loading state so loadNode can read the
+    // latest values synchronously without re-creating itself on every change.
+    useEffect(() => { treeChildrenRef.current = treeChildren; }, [treeChildren]);
+    useEffect(() => { loadingNodesRef.current = loadingNodes; }, [loadingNodes]);
+
+    const nodeId = (bucket, nodePrefix) => `${bucket}\u0000${nodePrefix}`;
+
+    const loadNode = useCallback(async (bucket, nodePrefix, force = false) => {
+        if (!s3Client) return;
+        const id = nodeId(bucket, nodePrefix);
+        if (!force && (treeChildrenRef.current[id] || loadingNodesRef.current[id])) return;
+        loadingNodesRef.current[id] = true;
+        setLoadingNodes(prev => ({ ...prev, [id]: true }));
+        try {
+            const resp = await s3Client.send(new ListObjectsV2Command({ Bucket: bucket, Prefix: nodePrefix, Delimiter: '/' }));
+            const folders = (resp.CommonPrefixes || []).map(p => ({ key: p.Prefix, name: p.Prefix.slice(nodePrefix.length).replace(/\/$/, '') }));
+            setTreeChildren(prev => ({ ...prev, [id]: folders }));
+        } catch (error) {
+            setTreeChildren(prev => ({ ...prev, [id]: [] }));
+        } finally {
+            setLoadingNodes(prev => { const n = { ...prev }; delete n[id]; return n; });
+        }
+    }, [s3Client]);
+
+    const toggleNode = useCallback((bucket, nodePrefix) => {
+        const id = nodeId(bucket, nodePrefix);
+        setExpandedNodes(prev => {
+            const next = { ...prev };
+            if (next[id]) delete next[id];
+            else { next[id] = true; loadNode(bucket, nodePrefix); }
+            return next;
+        });
+    }, [loadNode]);
+
+    const navigateTo = useCallback((bucket, nodePrefix) => {
+        setSearchParams(nodePrefix ? { bucket, prefix: nodePrefix } : { bucket });
+    }, [setSearchParams]);
+
+    // Re-fetches children for every currently expanded node so the tree stays in
+    // sync after a mutation (move, rename, delete, create folder, upload).
+    const refreshTree = useCallback(() => {
+        Object.keys(expandedNodes).forEach(id => {
+            if (!expandedNodes[id]) return;
+            const sep = id.indexOf('\u0000');
+            loadNode(id.slice(0, sep), id.slice(sep + 1), true);
+        });
+    }, [expandedNodes, loadNode]);
+
+    // Auto-expand the tree along the path of the bucket/prefix currently in view.
+    useEffect(() => {
+        if (!s3Client || !selectedBucket) return;
+        const segments = prefix.split('/').filter(Boolean);
+        const prefixes = [''];
+        let acc = '';
+        for (const seg of segments) { acc += `${seg}/`; prefixes.push(acc); }
+        setExpandedNodes(prev => {
+            const next = { ...prev };
+            prefixes.forEach(p => { next[nodeId(selectedBucket, p)] = true; });
+            return next;
+        });
+        prefixes.forEach(p => loadNode(selectedBucket, p));
+    }, [s3Client, selectedBucket, prefix, loadNode]);
+
+    // Uploads a flat list of { file, path } entries. `path` is relative to
+    // `targetPrefix` and may contain slashes, preserving folder structure.
+    const uploadEntries = useCallback(async (entries, targetBucket = selectedBucket, targetPrefix = prefix) => {
+        if (!s3Client || !targetBucket || !entries.length) return;
 
         const queue = entries
             .filter(e => e.file && e.path)
@@ -420,11 +544,11 @@ function App() {
         let failCount = 0;
 
         const uploadOne = async ({ file, path, id }) => {
-            const key = `${prefix}${path}`;
+            const key = `${targetPrefix}${path}`;
             try {
                 const parallelUpload = new Upload({
                     client: s3Client,
-                    params: { Bucket: selectedBucket, Key: key, Body: file },
+                    params: { Bucket: targetBucket, Key: key, Body: file },
                 });
                 parallelUpload.on("httpUploadProgress", (progress) => {
                     const percent = progress.total ? Math.round((progress.loaded / progress.total) * 100) : 0;
@@ -451,8 +575,11 @@ function App() {
 
         if (successCount) showAlert(`${successCount} file(s) uploaded successfully.`, 'success');
         if (failCount) showAlert(`${failCount} file(s) failed to upload.`, 'error');
-        fetchObjects(selectedBucket, prefix);
-    }, [s3Client, selectedBucket, prefix, showAlert, fetchObjects]);
+        if (targetBucket === selectedBucket && targetPrefix === prefix) {
+            fetchObjects(selectedBucket, prefix);
+        }
+        refreshTree();
+    }, [s3Client, selectedBucket, prefix, showAlert, fetchObjects, refreshTree]);
 
     // Maps a FileList from an <input> into upload entries. When `useRelativePath`
     // is set (folder picker), the browser-provided webkitRelativePath preserves
@@ -547,6 +674,7 @@ function App() {
         } finally {
             setIsDeleteModalOpen(false);
             fetchObjects(selectedBucket, prefix);
+            refreshTree();
         }
     };
 
@@ -583,8 +711,9 @@ function App() {
             showAlert('Failed to delete.', 'error');
         } finally {
             fetchObjects(selectedBucket, prefix);
+            refreshTree();
         }
-    }, [selectedBucket, prefix, collectAllKeysInPrefix, batchDeleteKeys, showAlert, fetchObjects]);
+    }, [selectedBucket, prefix, collectAllKeysInPrefix, batchDeleteKeys, showAlert, fetchObjects, refreshTree]);
 
     const openRenameModal = useCallback((obj) => {
         const currentName = obj.Key.replace(prefix, '').replace(/\/$/, '');
@@ -621,30 +750,35 @@ function App() {
             showAlert(`Renamed to "${trimmedName}" successfully.`, 'success');
             setIsRenameModalOpen(false);
             fetchObjects(selectedBucket, prefix);
+            refreshTree();
         } catch (error) {
             showAlert('Failed to rename.', 'error');
         }
-    }, [s3Client, selectedBucket, prefix, renameTarget, renameValue, collectAllKeysInPrefix, batchDeleteKeys, showAlert, fetchObjects]);
+    }, [s3Client, selectedBucket, prefix, renameTarget, renameValue, collectAllKeysInPrefix, batchDeleteKeys, showAlert, fetchObjects, refreshTree]);
 
-    const handleMoveItem = useCallback(async (sourceKey, targetFolderKey) => {
+    // Moves a file/folder into targetFolderKey. The source always lives in the
+    // currently selected bucket; targetBucket may differ to support moving across
+    // buckets via the sidebar tree.
+    const handleMoveItem = useCallback(async (sourceKey, targetFolderKey, targetBucket = selectedBucket) => {
         const isFolder = sourceKey.endsWith('/');
         const parts = sourceKey.replace(/\/$/, '').split('/');
         const name = parts[parts.length - 1];
         const newKey = isFolder ? `${targetFolderKey}${name}/` : `${targetFolderKey}${name}`;
-        if (sourceKey === newKey) return;
-        if (isFolder && newKey.startsWith(sourceKey)) {
+        const sameBucket = targetBucket === selectedBucket;
+        if (sameBucket && sourceKey === newKey) return;
+        if (sameBucket && isFolder && newKey.startsWith(sourceKey)) {
             showAlert('Cannot move a folder into itself.', 'error');
             return;
         }
         try {
             if (!isFolder) {
-                await s3Client.send(new CopyObjectCommand({ Bucket: selectedBucket, CopySource: encodeCopySource(selectedBucket, sourceKey), Key: newKey }));
+                await s3Client.send(new CopyObjectCommand({ Bucket: targetBucket, CopySource: encodeCopySource(selectedBucket, sourceKey), Key: newKey }));
                 await s3Client.send(new DeleteObjectsCommand({ Bucket: selectedBucket, Delete: { Objects: [{ Key: sourceKey }] } }));
             } else {
                 const keys = await collectAllKeysInPrefix(sourceKey);
                 for (const k of keys) {
                     const destKey = newKey + k.slice(sourceKey.length);
-                    await s3Client.send(new CopyObjectCommand({ Bucket: selectedBucket, CopySource: encodeCopySource(selectedBucket, k), Key: destKey }));
+                    await s3Client.send(new CopyObjectCommand({ Bucket: targetBucket, CopySource: encodeCopySource(selectedBucket, k), Key: destKey }));
                 }
                 if (keys.length > 0) {
                     await batchDeleteKeys(keys);
@@ -652,10 +786,46 @@ function App() {
             }
             showAlert('Moved successfully.', 'success');
             fetchObjects(selectedBucket, prefix);
+            refreshTree();
         } catch (error) {
             showAlert('Failed to move item.', 'error');
         }
-    }, [s3Client, selectedBucket, prefix, collectAllKeysInPrefix, batchDeleteKeys, showAlert, fetchObjects]);
+    }, [s3Client, selectedBucket, prefix, collectAllKeysInPrefix, batchDeleteKeys, showAlert, fetchObjects, refreshTree]);
+
+    // Drop onto a sidebar tree node: move the dragged item there, or upload
+    // dropped OS files/folders into that node's bucket/prefix.
+    const handleNodeDragOver = useCallback((e, id) => {
+        const external = isFileDrag(e);
+        if (!external && !draggedKeyRef.current) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = external ? 'copy' : 'move';
+        setTreeDropTarget(id);
+    }, []);
+
+    const handleNodeDragLeave = useCallback((id) => {
+        setTreeDropTarget(prev => prev === id ? null : prev);
+    }, []);
+
+    const handleNodeDrop = useCallback(async (e, bucket, nodePrefix) => {
+        const external = isFileDrag(e);
+        if (!external && !draggedKeyRef.current) return;
+        e.preventDefault();
+        e.stopPropagation();
+        setTreeDropTarget(null);
+        if (external) {
+            try {
+                const entries = await getEntriesFromDataTransfer(e.dataTransfer);
+                if (entries.length) uploadEntries(entries, bucket, nodePrefix);
+            } catch (err) {
+                showAlert('Could not read the dropped items.', 'error');
+            }
+            return;
+        }
+        const src = draggedKeyRef.current;
+        draggedKeyRef.current = null;
+        setDraggedKey(null);
+        if (src) handleMoveItem(src, nodePrefix, bucket);
+    }, [uploadEntries, handleMoveItem, showAlert]);
 
     const handleCreateFolder = useCallback(async () => {
         const trimmedName = newFolderName.trim();
@@ -674,10 +844,11 @@ function App() {
             setIsCreateFolderModalOpen(false);
             setNewFolderName('');
             fetchObjects(selectedBucket, prefix);
+            refreshTree();
         } catch (error) {
             showAlert(`Failed to create folder "${trimmedName}".`, 'error');
         }
-    }, [s3Client, selectedBucket, prefix, newFolderName, showAlert, fetchObjects]);
+    }, [s3Client, selectedBucket, prefix, newFolderName, showAlert, fetchObjects, refreshTree]);
 
     const handleDownload = async (key) => {        if (!s3Client || !selectedBucket) return;
         try {
@@ -731,6 +902,20 @@ function App() {
     
     const breadcrumbs = ['Buckets', selectedBucket, ...prefix.split('/').filter(Boolean)];
 
+    const treeCtx = {
+        selectedBucket,
+        currentPrefix: prefix,
+        expandedNodes,
+        treeChildren,
+        loadingNodes,
+        treeDropTarget,
+        onToggle: toggleNode,
+        onNavigate: navigateTo,
+        onNodeDragOver: handleNodeDragOver,
+        onNodeDragLeave: handleNodeDragLeave,
+        onNodeDrop: handleNodeDrop,
+    };
+
     return (
         <div className="h-screen w-screen bg-slate-900 text-slate-300 flex flex-col font-sans overflow-hidden">
             <Alert message={alertData?.message} type={alertData?.type} onDismiss={hideAlert} />
@@ -755,14 +940,17 @@ function App() {
                     {isLoadingBuckets ? (
                         <div className="flex-grow flex items-center justify-center"><Loader2 className="animate-spin text-slate-500" size={32}/></div>
                     ) : (
-                        <ul className="space-y-1 overflow-y-auto">
+                        <ul className="space-y-0.5 overflow-y-auto flex-grow">
                             {buckets.map(bucket => (
-                                <li key={bucket.Name}>
-                                    <button onClick={() => setSearchParams({ bucket: bucket.Name })} className={`flex items-center space-x-3 p-2 rounded-md transition-colors w-full text-left ${selectedBucket === bucket.Name ? 'bg-sky-500/20 text-sky-300' : 'hover:bg-slate-700/50'}`}>
-                                        <Folder size={18} className={`${selectedBucket === bucket.Name ? 'text-sky-400' : 'text-slate-500'}`} />
-                                        <span className="truncate flex-1">{bucket.Name}</span>
-                                    </button>
-                                </li>
+                                <TreeNode
+                                    key={bucket.Name}
+                                    ctx={treeCtx}
+                                    bucket={bucket.Name}
+                                    nodePrefix=""
+                                    label={bucket.Name}
+                                    depth={0}
+                                    isBucket
+                                />
                             ))}
                         </ul>
                     )}
