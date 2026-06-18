@@ -2,8 +2,8 @@ import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useSearchParams } from 'react-router-dom';
 import { S3Client, ListBucketsCommand, ListObjectsV2Command, CreateBucketCommand, DeleteBucketCommand, GetObjectCommand, PutObjectCommand, DeleteObjectsCommand, CopyObjectCommand } from "@aws-sdk/client-s3";
 import { Upload } from "@aws-sdk/lib-storage";
-import { HardDrive, Folder, File, Plus, Upload as UploadIcon, Download, Trash2, X, ChevronsRight, Loader2, Power, AlertTriangle, CheckCircle, Info, Beaker, Save, Server, Trash, Search, RefreshCw, Pencil, Eye, Copy, MoreVertical } from 'lucide-react';
-import { getPreviewType, getPublicUrl, encodeCopySource } from './utils/fileUtils';
+import { HardDrive, Folder, File, Plus, Upload as UploadIcon, FolderUp, Download, Trash2, X, ChevronsRight, Loader2, Power, AlertTriangle, CheckCircle, Info, Beaker, Save, Server, Trash, Search, RefreshCw, Pencil, Eye, Copy, MoreVertical } from 'lucide-react';
+import { getPreviewType, getPublicUrl, encodeCopySource, getEntriesFromDataTransfer } from './utils/fileUtils';
 import { useFilePreview } from './hooks/useFilePreview';
 import FilePreviewModal from './components/FilePreviewModal';
 
@@ -321,7 +321,9 @@ function App() {
     const [draggedKey, setDraggedKey] = useState(null);
     const [dropTargetKey, setDropTargetKey] = useState(null);
     const [openMenuKey, setOpenMenuKey] = useState(null);
+    const [isDraggingFiles, setIsDraggingFiles] = useState(false);
     const draggedKeyRef = useRef(null);
+    const dragCounter = useRef(0);
     const [searchQuery, setSearchQuery] = useState("");
     const [savedConnections, setSavedConnections] = useLocalStorage('minio-connections', []);
     const [connectionEndpoint, setConnectionEndpoint] = useState(null);
@@ -402,37 +404,111 @@ function App() {
         }
     }, [s3Client, showAlert]);
 
-     const handleFileUpload = async (files) => {
-        if (!s3Client || !selectedBucket || !files.length) return;
+    // Uploads a flat list of { file, path } entries. `path` is relative to the
+    // current prefix and may contain slashes, preserving folder structure.
+    const uploadEntries = useCallback(async (entries) => {
+        if (!s3Client || !selectedBucket || !entries.length) return;
 
-        for (const file of files) {
-            const uploadId = `${file.name}-${Date.now()}`;
-            const key = `${prefix}${file.name}`;
-            
-            setUploadingFiles(prev => [...prev, { id: uploadId, name: file.name, progress: 0 }]);
-            
+        const queue = entries
+            .filter(e => e.file && e.path)
+            .map((e, i) => ({ ...e, id: `${e.path}-${Date.now()}-${i}` }));
+        if (!queue.length) return;
+
+        setUploadingFiles(prev => [...prev, ...queue.map(q => ({ id: q.id, name: q.path, progress: 0 }))]);
+
+        let successCount = 0;
+        let failCount = 0;
+
+        const uploadOne = async ({ file, path, id }) => {
+            const key = `${prefix}${path}`;
             try {
-                const parallelUploads3 = new Upload({
+                const parallelUpload = new Upload({
                     client: s3Client,
                     params: { Bucket: selectedBucket, Key: key, Body: file },
                 });
-
-                parallelUploads3.on("httpUploadProgress", (progress) => {
-                     const percent = progress.total ? Math.round((progress.loaded / progress.total) * 100) : 0;
-                     setUploadingFiles(prev => prev.map(f => f.id === uploadId ? { ...f, progress: percent } : f));
+                parallelUpload.on("httpUploadProgress", (progress) => {
+                    const percent = progress.total ? Math.round((progress.loaded / progress.total) * 100) : 0;
+                    setUploadingFiles(prev => prev.map(f => f.id === id ? { ...f, progress: percent } : f));
                 });
-
-                await parallelUploads3.done();
-                showAlert(`File "${file.name}" uploaded successfully.`, 'success');
-                fetchObjects(selectedBucket, prefix);
+                await parallelUpload.done();
+                successCount++;
             } catch (err) {
-                showAlert(`Failed to upload "${file.name}".`, 'error');
+                failCount++;
             } finally {
-                setUploadingFiles(prev => prev.filter(f => f.id !== uploadId));
+                setUploadingFiles(prev => prev.filter(f => f.id !== id));
             }
+        };
+
+        // Upload with a small concurrency pool to keep the UI responsive.
+        const CONCURRENCY = 4;
+        let next = 0;
+        const worker = async () => {
+            while (next < queue.length) {
+                await uploadOne(queue[next++]);
+            }
+        };
+        await Promise.all(Array.from({ length: Math.min(CONCURRENCY, queue.length) }, worker));
+
+        if (successCount) showAlert(`${successCount} file(s) uploaded successfully.`, 'success');
+        if (failCount) showAlert(`${failCount} file(s) failed to upload.`, 'error');
+        fetchObjects(selectedBucket, prefix);
+    }, [s3Client, selectedBucket, prefix, showAlert, fetchObjects]);
+
+    // Maps a FileList from an <input> into upload entries. When `useRelativePath`
+    // is set (folder picker), the browser-provided webkitRelativePath preserves
+    // the selected folder's directory structure.
+    const handleInputUpload = useCallback((fileList, useRelativePath) => {
+        const entries = Array.from(fileList || []).map(file => ({
+            file,
+            path: useRelativePath ? (file.webkitRelativePath || file.name) : file.name,
+        }));
+        uploadEntries(entries);
+    }, [uploadEntries]);
+
+    // --- Drag & drop upload from the OS ---
+    // We only react to external file drags (types include 'Files'); internal
+    // row drags used for moving items don't carry the 'Files' type.
+    const isFileDrag = (e) => Array.from(e.dataTransfer?.types || []).includes('Files');
+
+    const handleDragEnter = useCallback((e) => {
+        if (!selectedBucket || !isFileDrag(e)) return;
+        e.preventDefault();
+        dragCounter.current++;
+        setIsDraggingFiles(true);
+    }, [selectedBucket]);
+
+    const handleDragOver = useCallback((e) => {
+        if (!selectedBucket || !isFileDrag(e)) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'copy';
+    }, [selectedBucket]);
+
+    const handleDragLeave = useCallback((e) => {
+        if (!isFileDrag(e)) return;
+        dragCounter.current--;
+        if (dragCounter.current <= 0) {
+            dragCounter.current = 0;
+            setIsDraggingFiles(false);
         }
-    };
-    
+    }, []);
+
+    const handleExternalDrop = useCallback(async (e) => {
+        if (!isFileDrag(e)) return;
+        e.preventDefault();
+        dragCounter.current = 0;
+        setIsDraggingFiles(false);
+        if (!selectedBucket) {
+            showAlert('Select a bucket before uploading.', 'error');
+            return;
+        }
+        try {
+            const entries = await getEntriesFromDataTransfer(e.dataTransfer);
+            if (entries.length) uploadEntries(entries);
+        } catch (err) {
+            showAlert('Could not read the dropped items.', 'error');
+        }
+    }, [selectedBucket, showAlert, uploadEntries]);
+
     const handleDeleteSelected = async () => {
         if (!s3Client || !selectedBucket || selectedItems.length === 0) return;
 
@@ -691,7 +767,22 @@ function App() {
                         </ul>
                     )}
                 </aside>
-                <main className="flex-1 flex flex-col bg-slate-900 min-w-0">
+                <main
+                    className="relative flex-1 flex flex-col bg-slate-900 min-w-0"
+                    onDragEnter={handleDragEnter}
+                    onDragOver={handleDragOver}
+                    onDragLeave={handleDragLeave}
+                    onDrop={handleExternalDrop}
+                >
+                    {isDraggingFiles && (
+                        <div className="absolute inset-0 z-20 m-2 rounded-xl border-2 border-dashed border-sky-400 bg-sky-500/10 backdrop-blur-sm flex items-center justify-center pointer-events-none">
+                            <div className="text-center">
+                                <UploadIcon className="mx-auto h-12 w-12 text-sky-400 mb-3" />
+                                <p className="text-lg font-semibold text-sky-200">Drop files or folders to upload</p>
+                                <p className="text-sm text-slate-400 mt-1">to {selectedBucket}/{prefix}</p>
+                            </div>
+                        </div>
+                    )}
                     <div className="flex-shrink-0 p-3 bg-slate-800/30 border-b border-slate-700 flex items-center justify-between gap-4">
                         <div className="flex-grow flex items-center text-sm text-slate-400 overflow-x-auto whitespace-nowrap">
                            {breadcrumbs.map((crumb, i) => (
@@ -729,10 +820,15 @@ function App() {
                                    <Plus size={16} />
                                    <span>New Folder</span>
                                </button>
+                               <label className="bg-slate-600 hover:bg-slate-500 text-white font-bold py-1.5 px-3 rounded-md transition-colors cursor-pointer flex items-center space-x-2">
+                                 <FolderUp size={16} />
+                                 <span>Upload Folder</span>
+                                 <input type="file" webkitdirectory="" directory="" multiple className="hidden" onChange={(e) => { handleInputUpload(e.target.files, true); e.target.value = ''; }} />
+                               </label>
                                <label className="bg-sky-600 hover:bg-sky-700 text-white font-bold py-1.5 px-3 rounded-md transition-colors cursor-pointer flex items-center space-x-2">
                                  <UploadIcon size={16} />
                                  <span>Upload</span>
-                                 <input type="file" multiple className="hidden" onChange={(e) => handleFileUpload(e.target.files)} />
+                                 <input type="file" multiple className="hidden" onChange={(e) => { handleInputUpload(e.target.files, false); e.target.value = ''; }} />
                                </label>
                                </>
                            )}
@@ -774,9 +870,10 @@ function App() {
                                             setDraggedKey(null);
                                             setDropTargetKey(null);
                                         }}
-                                        onDragOver={obj.isFolder ? (e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; setDropTargetKey(obj.Key); } : undefined}
+                                        onDragOver={obj.isFolder ? (e) => { if (isFileDrag(e)) { return; } e.preventDefault(); e.dataTransfer.dropEffect = 'move'; setDropTargetKey(obj.Key); } : undefined}
                                         onDragLeave={obj.isFolder ? () => setDropTargetKey(prev => prev === obj.Key ? null : prev) : undefined}
                                         onDrop={obj.isFolder ? (e) => {
+                                            if (isFileDrag(e)) return;
                                             e.preventDefault();
                                             const src = draggedKeyRef.current;
                                             if (src && src !== obj.Key && !src.startsWith(obj.Key)) {
@@ -887,6 +984,27 @@ function App() {
                     </div>
                 </div>
             </Modal>
+            {uploadingFiles.length > 0 && (
+                <div className="fixed bottom-5 right-5 z-50 w-80 max-w-[90vw] bg-slate-800 border border-slate-700 rounded-lg shadow-2xl overflow-hidden">
+                    <div className="px-4 py-2.5 border-b border-slate-700 flex items-center space-x-2">
+                        <Loader2 className="animate-spin h-4 w-4 text-sky-400" />
+                        <span className="text-sm font-semibold text-slate-100">Uploading {uploadingFiles.length} file(s)…</span>
+                    </div>
+                    <ul className="max-h-60 overflow-y-auto p-3 space-y-2.5">
+                        {uploadingFiles.map(f => (
+                            <li key={f.id}>
+                                <div className="flex items-center justify-between text-xs text-slate-300 mb-1">
+                                    <span className="truncate pr-2">{f.name}</span>
+                                    <span className="flex-shrink-0 text-slate-400">{f.progress}%</span>
+                                </div>
+                                <div className="h-1.5 w-full bg-slate-700 rounded-full overflow-hidden">
+                                    <div className="h-full bg-sky-500 transition-all duration-200" style={{ width: `${f.progress}%` }} />
+                                </div>
+                            </li>
+                        ))}
+                    </ul>
+                </div>
+            )}
             <FilePreviewModal item={previewItem} objectUrl={previewObjectUrl} isLoading={isLoadingPreview} onClose={closePreview} />
         </div>
     );
