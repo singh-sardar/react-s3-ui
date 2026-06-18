@@ -434,6 +434,7 @@ function App() {
     const [savedConnections, setSavedConnections] = useLocalStorage('minio-connections', []);
     const [connectionEndpoint, setConnectionEndpoint] = useState(null);
     const [publicEndpoint, setPublicEndpoint] = useState(null);
+    const [activeConnectionId, setActiveConnectionId] = useState(null);
     
     const { alertData, showAlert, hideAlert } = useAlert();
 
@@ -462,6 +463,13 @@ function App() {
             setS3Client(client);
             setConnectionEndpoint(connectionDetails.endpoint);
             setPublicEndpoint(connectionDetails.publicEndpoint || connectionDetails.endpoint);
+            // Mark which saved connection is active (matched by endpoint + credentials).
+            const match = savedConnections.find(c =>
+                c.endpoint === connectionDetails.endpoint &&
+                c.accessKey === connectionDetails.accessKey &&
+                c.secretKey === connectionDetails.secretKey
+            );
+            setActiveConnectionId(match ? match.id : null);
         } catch (error) {
             showAlert(`Connection failed: ${error.name}.`, 'error');
         }
@@ -471,13 +479,31 @@ function App() {
         setS3Client(null);
         setConnectionEndpoint(null);
         setPublicEndpoint(null);
+        setActiveConnectionId(null);
         setBuckets([]);
         setObjects([]);
         setSelectedItems([]);
+        setExpandedNodes({});
+        setTreeChildren({});
+        setLoadingNodes({});
         setSearchQuery('');
         setSearchParams({});
-        showAlert('Disconnected.', 'info');
-    }, [showAlert, setSearchParams]);
+    }, [setSearchParams]);
+
+    // Quickly switch to another saved connection from the header.
+    const handleSwitchConnection = useCallback((id) => {
+        const conn = savedConnections.find(c => c.id === id);
+        if (!conn) return;
+        // Reset the previous connection's navigation and tree caches.
+        setSearchParams({});
+        setExpandedNodes({});
+        setTreeChildren({});
+        setLoadingNodes({});
+        setObjects([]);
+        setSelectedItems([]);
+        setSearchQuery('');
+        handleConnect({ endpoint: conn.endpoint, publicEndpoint: conn.publicEndpoint, accessKey: conn.accessKey, secretKey: conn.secretKey }, false);
+    }, [savedConnections, handleConnect, setSearchParams]);
 
     const fetchBuckets = useCallback(async () => {
         if (!s3Client) return;
@@ -1004,12 +1030,28 @@ function App() {
         <div className="h-screen w-screen bg-slate-900 text-slate-300 flex flex-col font-sans overflow-hidden">
             <Alert message={alertData?.message} type={alertData?.type} onDismiss={hideAlert} />
             <header className="flex-shrink-0 bg-slate-800/50 border-b border-slate-700 p-2 flex items-center justify-between">
-                <div className="flex items-center space-x-2">
+                <button
+                    onClick={handleDisconnect}
+                    title="Back to connections"
+                    className="flex items-center space-x-2 rounded-md px-2 py-1 hover:bg-slate-700/60 transition-colors"
+                >
                     <HardDrive className="h-6 w-6 text-sky-400" />
                     <span className="font-semibold text-lg text-slate-100">Minio Explorer</span>
-                </div>
+                </button>
                 <div className="flex items-center space-x-4">
-                    <span className="text-sm text-slate-400">Connected</span>
+                    {savedConnections.length > 0 && (
+                        <select
+                            value={activeConnectionId ?? ''}
+                            onChange={(e) => { if (e.target.value) handleSwitchConnection(Number(e.target.value)); }}
+                            title="Switch connection"
+                            className="bg-slate-900 border border-slate-700 rounded-md px-3 py-1.5 text-sm text-slate-200 focus:ring-2 focus:ring-sky-500 focus:border-sky-500 outline-none transition max-w-[12rem]"
+                        >
+                            {activeConnectionId === null && <option value="">Current (unsaved)</option>}
+                            {savedConnections.map(conn => (
+                                <option key={conn.id} value={conn.id}>{conn.name}</option>
+                            ))}
+                        </select>
+                    )}
                     <button onClick={handleDisconnect} className="flex items-center space-x-2 bg-red-600 hover:bg-red-700 text-white font-bold py-1.5 px-3 rounded-md transition-colors">
                         <Power size={16} />
                         <span>Disconnect</span>
