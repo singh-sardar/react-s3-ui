@@ -157,13 +157,30 @@ const TreeNode = ({ ctx, bucket, nodePrefix, label, depth, isBucket }) => {
                 </button>
                 <button
                     onClick={() => ctx.onNavigate(bucket, nodePrefix)}
-                    className="flex items-center space-x-2 py-1.5 pr-2 flex-1 min-w-0 text-left"
+                    className="flex items-center space-x-2 py-1.5 pr-1 flex-1 min-w-0 text-left"
                 >
                     {isBucket
                         ? <HardDrive size={16} className={isActive ? 'text-sky-400' : 'text-slate-500'} />
                         : <Folder size={16} className={isActive ? 'text-sky-400' : 'text-slate-500'} />}
                     <span className="truncate">{label}</span>
                 </button>
+                <div className="relative flex-shrink-0">
+                    <button
+                        onClick={(e) => { e.stopPropagation(); ctx.onMenuToggle(id); }}
+                        className="p-1 mr-1 rounded text-slate-500 hover:text-white hover:bg-slate-600 opacity-0 group-hover:opacity-100 focus:opacity-100 transition"
+                        aria-label="Actions"
+                    >
+                        <MoreVertical size={14} />
+                    </button>
+                    <ContextMenu
+                        isOpen={ctx.openMenuId === id}
+                        onClose={ctx.onMenuClose}
+                        items={[
+                            { icon: <Copy size={14}/>, label: 'Copy Public URL', action: () => ctx.onCopyUrl(bucket, nodePrefix) },
+                            ...(isBucket ? [] : [{ icon: <Trash2 size={14}/>, label: 'Delete', action: () => ctx.onDelete(bucket, nodePrefix, label), danger: true }]),
+                        ]}
+                    />
+                </div>
             </div>
             {isExpanded && children && children.length > 0 && (
                 <ul>
@@ -379,6 +396,8 @@ function App() {
     const [treeChildren, setTreeChildren] = useState({});
     const [loadingNodes, setLoadingNodes] = useState({});
     const [treeDropTarget, setTreeDropTarget] = useState(null);
+    const [openTreeMenuId, setOpenTreeMenuId] = useState(null);
+    const [treeDeleteTarget, setTreeDeleteTarget] = useState(null);
     const draggedKeyRef = useRef(null);
     const dragCounter = useRef(0);
     const treeChildrenRef = useRef({});
@@ -678,25 +697,25 @@ function App() {
         }
     };
 
-    const collectAllKeysInPrefix = useCallback(async (prefixToScan) => {
+    const collectAllKeysInPrefix = useCallback(async (prefixToScan, bucket = selectedBucket) => {
         let keys = [];
         let continuationToken;
         do {
-            const resp = await s3Client.send(new ListObjectsV2Command({ Bucket: selectedBucket, Prefix: prefixToScan, ContinuationToken: continuationToken }));
+            const resp = await s3Client.send(new ListObjectsV2Command({ Bucket: bucket, Prefix: prefixToScan, ContinuationToken: continuationToken }));
             if (resp.Contents) keys.push(...resp.Contents.map(c => c.Key));
             continuationToken = resp.NextContinuationToken;
         } while (continuationToken);
         return keys;
     }, [s3Client, selectedBucket]);
 
-    const batchDeleteKeys = useCallback(async (keys) => {
+    const batchDeleteKeys = useCallback(async (keys, bucket = selectedBucket) => {
         // S3 DeleteObjectsCommand supports max 1000 objects per request
         const BATCH_SIZE = 1000;
         for (let i = 0; i < keys.length; i += BATCH_SIZE) {
             const batch = keys.slice(i, i + BATCH_SIZE);
-            await s3Client.send(new DeleteObjectsCommand({ 
-                Bucket: selectedBucket, 
-                Delete: { Objects: batch.map(Key => ({ Key })) } 
+            await s3Client.send(new DeleteObjectsCommand({
+                Bucket: bucket,
+                Delete: { Objects: batch.map(Key => ({ Key })) }
             }));
         }
     }, [s3Client, selectedBucket]);
@@ -827,6 +846,38 @@ function App() {
         if (src) handleMoveItem(src, nodePrefix, bucket);
     }, [uploadEntries, handleMoveItem, showAlert]);
 
+    // Copies the public URL of a tree node (bucket root or folder).
+    const handleCopyNodeUrl = useCallback(async (bucket, nodePrefix) => {
+        const url = getPublicUrl(publicEndpoint, bucket, nodePrefix);
+        try {
+            await navigator.clipboard.writeText(url);
+            showAlert('Public URL copied to clipboard.', 'success');
+        } catch (err) {
+            showAlert('Failed to copy URL.', 'error');
+        }
+    }, [publicEndpoint, showAlert]);
+
+    // Deletes a folder node and everything under it (confirmed via modal).
+    const handleDeleteNode = useCallback(async (bucket, nodePrefix) => {
+        try {
+            const keys = await collectAllKeysInPrefix(nodePrefix, bucket);
+            if (keys.length > 0) await batchDeleteKeys(keys, bucket);
+            showAlert('Folder deleted successfully.', 'success');
+        } catch (error) {
+            showAlert('Failed to delete folder.', 'error');
+        } finally {
+            // If we deleted the folder currently in view (or an ancestor of it),
+            // navigate up to the closest still-existing parent.
+            if (bucket === selectedBucket && (prefix === nodePrefix || prefix.startsWith(nodePrefix))) {
+                const parent = nodePrefix.replace(/[^/]+\/$/, '');
+                setSearchParams(parent ? { bucket, prefix: parent } : { bucket });
+            } else if (bucket === selectedBucket) {
+                fetchObjects(selectedBucket, prefix);
+            }
+            refreshTree();
+        }
+    }, [collectAllKeysInPrefix, batchDeleteKeys, showAlert, selectedBucket, prefix, setSearchParams, fetchObjects, refreshTree]);
+
     const handleCreateFolder = useCallback(async () => {
         const trimmedName = newFolderName.trim();
         if (!trimmedName) {
@@ -909,11 +960,16 @@ function App() {
         treeChildren,
         loadingNodes,
         treeDropTarget,
+        openMenuId: openTreeMenuId,
         onToggle: toggleNode,
         onNavigate: navigateTo,
         onNodeDragOver: handleNodeDragOver,
         onNodeDragLeave: handleNodeDragLeave,
         onNodeDrop: handleNodeDrop,
+        onMenuToggle: (id) => setOpenTreeMenuId(prev => prev === id ? null : id),
+        onMenuClose: () => setOpenTreeMenuId(null),
+        onCopyUrl: handleCopyNodeUrl,
+        onDelete: (bucket, nodePrefix, name) => setTreeDeleteTarget({ bucket, prefix: nodePrefix, name }),
     };
 
     return (
@@ -1169,6 +1225,24 @@ function App() {
                     <div className="mt-6 flex justify-end space-x-3">
                         <button type="button" onClick={() => setIsDeleteModalOpen(false)} className="px-4 py-2 rounded-md bg-slate-700 hover:bg-slate-600 text-slate-100 font-semibold transition">Cancel</button>
                         <button type="button" onClick={handleDeleteSelected} className="px-4 py-2 rounded-md bg-red-600 hover:bg-red-700 text-white font-semibold transition">Delete</button>
+                    </div>
+                </div>
+            </Modal>
+            <Modal isOpen={!!treeDeleteTarget} onClose={() => setTreeDeleteTarget(null)} title="Confirm Deletion">
+                <div className="text-slate-300">
+                    <p className="mb-4">
+                        Are you sure you want to permanently delete the folder <span className="font-semibold text-slate-100">&quot;{treeDeleteTarget?.name}&quot;</span> and all of its contents? This action cannot be undone.
+                    </p>
+                    <p className="text-xs text-slate-500 mb-6 truncate">{treeDeleteTarget?.bucket} / {treeDeleteTarget?.prefix}</p>
+                    <div className="mt-6 flex justify-end space-x-3">
+                        <button type="button" onClick={() => setTreeDeleteTarget(null)} className="px-4 py-2 rounded-md bg-slate-700 hover:bg-slate-600 text-slate-100 font-semibold transition">Cancel</button>
+                        <button
+                            type="button"
+                            onClick={() => { const t = treeDeleteTarget; setTreeDeleteTarget(null); handleDeleteNode(t.bucket, t.prefix); }}
+                            className="px-4 py-2 rounded-md bg-red-600 hover:bg-red-700 text-white font-semibold transition"
+                        >
+                            Delete
+                        </button>
                     </div>
                 </div>
             </Modal>
