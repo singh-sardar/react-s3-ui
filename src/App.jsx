@@ -206,6 +206,7 @@ const ConnectionManager = ({ onConnect, isConnecting, showAlert }) => {
     const [savedConnections, setSavedConnections] = useLocalStorage('minio-connections', []);
     const [isTesting, setIsTesting] = useState(false);
     const [testResult, setTestResult] = useState({ message: '', type: '' });
+    const [flashForm, setFlashForm] = useState(false);
     
     const handleTestConnection = async () => {
         setIsTesting(true);
@@ -235,6 +236,20 @@ const ConnectionManager = ({ onConnect, isConnecting, showAlert }) => {
     const handleQuickConnect = (conn) => {
         const connectionDetails = { endpoint: conn.endpoint, publicEndpoint: conn.publicEndpoint, accessKey: conn.accessKey, secretKey: conn.secretKey };
         onConnect(connectionDetails, false);
+    };
+
+    const handleNewConnection = () => {
+        setEndpoint('http://127.0.0.1:9000');
+        setPublicEndpoint('');
+        setAccessKey('minioadmin');
+        setSecretKey('minioadmin');
+        setConnectionName('');
+        setSaveConnection(false);
+        setTestResult({ message: '', type: '' });
+        // Retrigger the flash/shake animation even on rapid repeated clicks:
+        // drop the class, then re-add it on the next frame.
+        setFlashForm(false);
+        requestAnimationFrame(() => setFlashForm(true));
     };
 
     const handleDeleteConnection = (id) => {
@@ -268,32 +283,45 @@ const ConnectionManager = ({ onConnect, isConnecting, showAlert }) => {
     return (
         <div className="min-h-screen w-full flex items-center justify-center bg-slate-900 p-4">
             <div className="w-full max-w-4xl mx-auto flex lg:flex-row flex-col gap-8">
-                <div className="lg:w-1/3 w-full bg-slate-800 rounded-2xl shadow-2xl p-6 border border-slate-700 flex flex-col">
-                    <div className="flex items-center gap-3 mb-4">
+                <div className="lg:w-1/3 w-full bg-slate-800 rounded-2xl shadow-2xl p-6 border border-slate-700 flex flex-col lg:max-h-[80vh]">
+                    <div className="flex items-center gap-3 mb-4 flex-shrink-0">
                          <Server className="h-6 w-6 text-sky-400"/>
                         <h2 className="text-xl font-bold text-slate-100">Saved Connections</h2>
                     </div>
-                    {savedConnections.length === 0 ? (
-                        <p className="text-slate-400 text-sm text-center py-8">No saved connections yet.</p>
-                    ) : (
-                        <ul className="space-y-2 max-h-96 overflow-y-auto">
-                            {savedConnections.map(conn => (
-                                <li key={conn.id} className="bg-slate-900 p-3 rounded-md flex items-center justify-between gap-2">
-                                    <div className="truncate cursor-pointer" onClick={() => handleLoadConnection(conn)}>
-                                        <p className="font-semibold text-slate-200 truncate">{conn.name}</p>
-                                        <p className="text-xs text-slate-400 truncate">{conn.endpoint}</p>
-                                    </div>
-                                    <div className="flex items-center flex-shrink-0">
-                                        <button onClick={() => handleDeleteConnection(conn.id)} className="p-2 text-slate-500 hover:text-red-400 rounded-full hover:bg-slate-700"><Trash size={16}/></button>
-                                        <button onClick={() => handleQuickConnect(conn)} className="p-2 text-slate-500 hover:text-sky-400 rounded-full hover:bg-slate-700"><Power size={16}/></button>
-                                    </div>
-                                </li>
-                            ))}
-                        </ul>
-                    )}
+                    <div className="flex-1 min-h-0 overflow-y-auto">
+                        {savedConnections.length === 0 ? (
+                            <p className="text-slate-400 text-sm text-center py-8">No saved connections yet.</p>
+                        ) : (
+                            <ul className="space-y-2">
+                                {savedConnections.map(conn => (
+                                    <li key={conn.id} className="bg-slate-900 p-3 rounded-md flex items-center justify-between gap-2">
+                                        <div className="truncate cursor-pointer" onClick={() => handleLoadConnection(conn)}>
+                                            <p className="font-semibold text-slate-200 truncate">{conn.name}</p>
+                                            <p className="text-xs text-slate-400 truncate">{conn.endpoint}</p>
+                                        </div>
+                                        <div className="flex items-center flex-shrink-0">
+                                            <button onClick={() => handleDeleteConnection(conn.id)} className="p-2 text-slate-500 hover:text-red-400 rounded-full hover:bg-slate-700"><Trash size={16}/></button>
+                                            <button onClick={() => handleQuickConnect(conn)} className="p-2 text-slate-500 hover:text-sky-400 rounded-full hover:bg-slate-700"><Power size={16}/></button>
+                                        </div>
+                                    </li>
+                                ))}
+                            </ul>
+                        )}
+                    </div>
+                    <button
+                        type="button"
+                        onClick={handleNewConnection}
+                        className="mt-4 flex-shrink-0 w-full flex items-center justify-center gap-2 bg-sky-600 hover:bg-sky-700 text-white font-bold py-2.5 px-4 rounded-md transition-colors"
+                    >
+                        <Plus size={18} />
+                        <span>New Connection</span>
+                    </button>
                 </div>
 
-                <div className="lg:w-2/3 w-full bg-slate-800 rounded-2xl shadow-2xl p-8 border border-slate-700">
+                <div
+                    onAnimationEnd={() => setFlashForm(false)}
+                    className={`lg:w-2/3 w-full bg-slate-800 rounded-2xl shadow-2xl p-8 border border-slate-700 ${flashForm ? 'form-flash' : ''}`}
+                >
                     <div className="text-center mb-8">
                         <HardDrive className="mx-auto h-12 w-12 text-sky-400" />
                         <h1 className="mt-4 text-2xl font-bold text-slate-100">Connect to Minio</h1>
