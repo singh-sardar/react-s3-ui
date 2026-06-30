@@ -15,18 +15,18 @@ jobs:
     permissions:
       id-token: write
     steps:
-       - name: Checkout repository
-         uses: actions/checkout@v6
-         with:
-           fetch-depth: 1
-           persist-credentials: false
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+          persist-credentials: false
 
-       - name: Run OpenCode
+      - name: Run OpenCode
         uses: anomalyco/opencode/github@latest
-       # env:
-        #  ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        # env:
+        #   ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         with:
           model: google/gemma-4-31b-it:free
-         # model: anthropic/claude-sonnet-4-20250514
+          # model: anthropic/claude-sonnet-4-20250514
           # share: true
           # github_token: xxxx
