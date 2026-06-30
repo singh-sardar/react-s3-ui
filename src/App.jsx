@@ -2,8 +2,8 @@ import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useSearchParams } from 'react-router-dom';
 import { S3Client, ListBucketsCommand, ListObjectsV2Command, CreateBucketCommand, DeleteBucketCommand, GetObjectCommand, PutObjectCommand, DeleteObjectsCommand, CopyObjectCommand } from "@aws-sdk/client-s3";
 import { Upload } from "@aws-sdk/lib-storage";
-import { HardDrive, Folder, File, Plus, Upload as UploadIcon, Download, Trash2, X, ChevronsRight, Loader2, Power, AlertTriangle, CheckCircle, Info, Beaker, Save, Server, Trash, Search, RefreshCw, Pencil, Eye, Copy, MoreVertical } from 'lucide-react';
-import { getPreviewType, getPublicUrl, encodeCopySource } from './utils/fileUtils';
+import { HardDrive, Folder, File, Plus, Upload as UploadIcon, FolderUp, Download, Trash2, X, ChevronsRight, ChevronRight, Loader2, Power, AlertTriangle, CheckCircle, Info, Beaker, Save, Server, Trash, Search, RefreshCw, Pencil, Eye, Copy, MoreVertical } from 'lucide-react';
+import { getPreviewType, getPublicUrl, encodeCopySource, getEntriesFromDataTransfer } from './utils/fileUtils';
 import { useFilePreview } from './hooks/useFilePreview';
 import FilePreviewModal from './components/FilePreviewModal';
 
@@ -123,6 +123,76 @@ const ContextMenu = ({ isOpen, onClose, items }) => {
     );
 };
 
+// Recursive Finder-style tree node for the sidebar. Buckets are roots (prefix
+// ''); folders are nested nodes. All shared state/handlers come through `ctx`.
+const TreeNode = ({ ctx, bucket, nodePrefix, label, depth, isBucket }) => {
+    const id = `${bucket}\u0000${nodePrefix}`;
+    const isExpanded = !!ctx.expandedNodes[id];
+    const isLoading = !!ctx.loadingNodes[id];
+    const children = ctx.treeChildren[id];
+    const isActive = ctx.selectedBucket === bucket && ctx.currentPrefix === nodePrefix;
+    const isDropTarget = ctx.treeDropTarget === id;
+
+    return (
+        <li>
+            <div
+                style={{ paddingLeft: `${depth * 14 + 4}px` }}
+                onDragOver={(e) => ctx.onNodeDragOver(e, id)}
+                onDragLeave={() => ctx.onNodeDragLeave(id)}
+                onDrop={(e) => ctx.onNodeDrop(e, bucket, nodePrefix)}
+                className={[
+                    'flex items-center rounded-md transition-colors group',
+                    isActive ? 'bg-sky-500/20 text-sky-300' : 'hover:bg-slate-700/50',
+                    isDropTarget ? 'ring-1 ring-inset ring-emerald-500 bg-emerald-900/40' : '',
+                ].join(' ')}
+            >
+                <button
+                    onClick={() => ctx.onToggle(bucket, nodePrefix)}
+                    className="p-1 text-slate-500 hover:text-slate-200 flex-shrink-0"
+                    aria-label={isExpanded ? 'Collapse' : 'Expand'}
+                >
+                    {isLoading
+                        ? <Loader2 size={14} className="animate-spin" />
+                        : <ChevronRight size={14} className={`transition-transform ${isExpanded ? 'rotate-90' : ''}`} />}
+                </button>
+                <button
+                    onClick={() => ctx.onNavigate(bucket, nodePrefix)}
+                    className="flex items-center space-x-2 py-1.5 pr-1 flex-1 min-w-0 text-left"
+                >
+                    {isBucket
+                        ? <HardDrive size={16} className={isActive ? 'text-sky-400' : 'text-slate-500'} />
+                        : <Folder size={16} className={isActive ? 'text-sky-400' : 'text-slate-500'} />}
+                    <span className="truncate">{label}</span>
+                </button>
+                <div className="relative flex-shrink-0">
+                    <button
+                        onClick={(e) => { e.stopPropagation(); ctx.onMenuToggle(id); }}
+                        className="p-1 mr-1 rounded text-slate-500 hover:text-white hover:bg-slate-600 opacity-0 group-hover:opacity-100 focus:opacity-100 transition"
+                        aria-label="Actions"
+                    >
+                        <MoreVertical size={14} />
+                    </button>
+                    <ContextMenu
+                        isOpen={ctx.openMenuId === id}
+                        onClose={ctx.onMenuClose}
+                        items={[
+                            { icon: <Copy size={14}/>, label: 'Copy Public URL', action: () => ctx.onCopyUrl(bucket, nodePrefix) },
+                            ...(isBucket ? [] : [{ icon: <Trash2 size={14}/>, label: 'Delete', action: () => ctx.onDelete(bucket, nodePrefix, label), danger: true }]),
+                        ]}
+                    />
+                </div>
+            </div>
+            {isExpanded && children && children.length > 0 && (
+                <ul>
+                    {children.map(c => (
+                        <TreeNode key={c.key} ctx={ctx} bucket={bucket} nodePrefix={c.key} label={c.name} depth={depth + 1} isBucket={false} />
+                    ))}
+                </ul>
+            )}
+        </li>
+    );
+};
+
 // --- Main Application Components ---
 
 const ConnectionManager = ({ onConnect, isConnecting, showAlert }) => {
@@ -136,6 +206,7 @@ const ConnectionManager = ({ onConnect, isConnecting, showAlert }) => {
     const [savedConnections, setSavedConnections] = useLocalStorage('minio-connections', []);
     const [isTesting, setIsTesting] = useState(false);
     const [testResult, setTestResult] = useState({ message: '', type: '' });
+    const [flashForm, setFlashForm] = useState(false);
     
     const handleTestConnection = async () => {
         setIsTesting(true);
@@ -165,6 +236,20 @@ const ConnectionManager = ({ onConnect, isConnecting, showAlert }) => {
     const handleQuickConnect = (conn) => {
         const connectionDetails = { endpoint: conn.endpoint, publicEndpoint: conn.publicEndpoint, accessKey: conn.accessKey, secretKey: conn.secretKey };
         onConnect(connectionDetails, false);
+    };
+
+    const handleNewConnection = () => {
+        setEndpoint('http://127.0.0.1:9000');
+        setPublicEndpoint('');
+        setAccessKey('minioadmin');
+        setSecretKey('minioadmin');
+        setConnectionName('');
+        setSaveConnection(false);
+        setTestResult({ message: '', type: '' });
+        // Retrigger the flash/shake animation even on rapid repeated clicks:
+        // drop the class, then re-add it on the next frame.
+        setFlashForm(false);
+        requestAnimationFrame(() => setFlashForm(true));
     };
 
     const handleDeleteConnection = (id) => {
@@ -198,32 +283,45 @@ const ConnectionManager = ({ onConnect, isConnecting, showAlert }) => {
     return (
         <div className="min-h-screen w-full flex items-center justify-center bg-slate-900 p-4">
             <div className="w-full max-w-4xl mx-auto flex lg:flex-row flex-col gap-8">
-                <div className="lg:w-1/3 w-full bg-slate-800 rounded-2xl shadow-2xl p-6 border border-slate-700 flex flex-col">
-                    <div className="flex items-center gap-3 mb-4">
+                <div className="lg:w-1/3 w-full bg-slate-800 rounded-2xl shadow-2xl p-6 border border-slate-700 flex flex-col lg:max-h-[80vh]">
+                    <div className="flex items-center gap-3 mb-4 flex-shrink-0">
                          <Server className="h-6 w-6 text-sky-400"/>
                         <h2 className="text-xl font-bold text-slate-100">Saved Connections</h2>
                     </div>
-                    {savedConnections.length === 0 ? (
-                        <p className="text-slate-400 text-sm text-center py-8">No saved connections yet.</p>
-                    ) : (
-                        <ul className="space-y-2 max-h-96 overflow-y-auto">
-                            {savedConnections.map(conn => (
-                                <li key={conn.id} className="bg-slate-900 p-3 rounded-md flex items-center justify-between gap-2">
-                                    <div className="truncate cursor-pointer" onClick={() => handleLoadConnection(conn)}>
-                                        <p className="font-semibold text-slate-200 truncate">{conn.name}</p>
-                                        <p className="text-xs text-slate-400 truncate">{conn.endpoint}</p>
-                                    </div>
-                                    <div className="flex items-center flex-shrink-0">
-                                        <button onClick={() => handleDeleteConnection(conn.id)} className="p-2 text-slate-500 hover:text-red-400 rounded-full hover:bg-slate-700"><Trash size={16}/></button>
-                                        <button onClick={() => handleQuickConnect(conn)} className="p-2 text-slate-500 hover:text-sky-400 rounded-full hover:bg-slate-700"><Power size={16}/></button>
-                                    </div>
-                                </li>
-                            ))}
-                        </ul>
-                    )}
+                    <div className="flex-1 min-h-0 overflow-y-auto">
+                        {savedConnections.length === 0 ? (
+                            <p className="text-slate-400 text-sm text-center py-8">No saved connections yet.</p>
+                        ) : (
+                            <ul className="space-y-2">
+                                {savedConnections.map(conn => (
+                                    <li key={conn.id} className="bg-slate-900 p-3 rounded-md flex items-center justify-between gap-2">
+                                        <div className="truncate cursor-pointer" onClick={() => handleLoadConnection(conn)}>
+                                            <p className="font-semibold text-slate-200 truncate">{conn.name}</p>
+                                            <p className="text-xs text-slate-400 truncate">{conn.endpoint}</p>
+                                        </div>
+                                        <div className="flex items-center flex-shrink-0">
+                                            <button onClick={() => handleDeleteConnection(conn.id)} className="p-2 text-slate-500 hover:text-red-400 rounded-full hover:bg-slate-700"><Trash size={16}/></button>
+                                            <button onClick={() => handleQuickConnect(conn)} className="p-2 text-slate-500 hover:text-sky-400 rounded-full hover:bg-slate-700"><Power size={16}/></button>
+                                        </div>
+                                    </li>
+                                ))}
+                            </ul>
+                        )}
+                    </div>
+                    <button
+                        type="button"
+                        onClick={handleNewConnection}
+                        className="mt-4 flex-shrink-0 w-full flex items-center justify-center gap-2 bg-sky-600 hover:bg-sky-700 text-white font-bold py-2.5 px-4 rounded-md transition-colors"
+                    >
+                        <Plus size={18} />
+                        <span>New Connection</span>
+                    </button>
                 </div>
 
-                <div className="lg:w-2/3 w-full bg-slate-800 rounded-2xl shadow-2xl p-8 border border-slate-700">
+                <div
+                    onAnimationEnd={() => setFlashForm(false)}
+                    className={`lg:w-2/3 w-full bg-slate-800 rounded-2xl shadow-2xl p-8 border border-slate-700 ${flashForm ? 'form-flash' : ''}`}
+                >
                     <div className="text-center mb-8">
                         <HardDrive className="mx-auto h-12 w-12 text-sky-400" />
                         <h1 className="mt-4 text-2xl font-bold text-slate-100">Connect to Minio</h1>
@@ -321,11 +419,22 @@ function App() {
     const [draggedKey, setDraggedKey] = useState(null);
     const [dropTargetKey, setDropTargetKey] = useState(null);
     const [openMenuKey, setOpenMenuKey] = useState(null);
+    const [isDraggingFiles, setIsDraggingFiles] = useState(false);
+    const [expandedNodes, setExpandedNodes] = useState({});
+    const [treeChildren, setTreeChildren] = useState({});
+    const [loadingNodes, setLoadingNodes] = useState({});
+    const [treeDropTarget, setTreeDropTarget] = useState(null);
+    const [openTreeMenuId, setOpenTreeMenuId] = useState(null);
+    const [treeDeleteTarget, setTreeDeleteTarget] = useState(null);
     const draggedKeyRef = useRef(null);
+    const dragCounter = useRef(0);
+    const treeChildrenRef = useRef({});
+    const loadingNodesRef = useRef({});
     const [searchQuery, setSearchQuery] = useState("");
     const [savedConnections, setSavedConnections] = useLocalStorage('minio-connections', []);
     const [connectionEndpoint, setConnectionEndpoint] = useState(null);
     const [publicEndpoint, setPublicEndpoint] = useState(null);
+    const [activeConnectionId, setActiveConnectionId] = useState(null);
     
     const { alertData, showAlert, hideAlert } = useAlert();
 
@@ -354,6 +463,13 @@ function App() {
             setS3Client(client);
             setConnectionEndpoint(connectionDetails.endpoint);
             setPublicEndpoint(connectionDetails.publicEndpoint || connectionDetails.endpoint);
+            // Mark which saved connection is active (matched by endpoint + credentials).
+            const match = savedConnections.find(c =>
+                c.endpoint === connectionDetails.endpoint &&
+                c.accessKey === connectionDetails.accessKey &&
+                c.secretKey === connectionDetails.secretKey
+            );
+            setActiveConnectionId(match ? match.id : null);
         } catch (error) {
             showAlert(`Connection failed: ${error.name}.`, 'error');
         }
@@ -363,13 +479,31 @@ function App() {
         setS3Client(null);
         setConnectionEndpoint(null);
         setPublicEndpoint(null);
+        setActiveConnectionId(null);
         setBuckets([]);
         setObjects([]);
         setSelectedItems([]);
+        setExpandedNodes({});
+        setTreeChildren({});
+        setLoadingNodes({});
         setSearchQuery('');
         setSearchParams({});
-        showAlert('Disconnected.', 'info');
-    }, [showAlert, setSearchParams]);
+    }, [setSearchParams]);
+
+    // Quickly switch to another saved connection from the header.
+    const handleSwitchConnection = useCallback((id) => {
+        const conn = savedConnections.find(c => c.id === id);
+        if (!conn) return;
+        // Reset the previous connection's navigation and tree caches.
+        setSearchParams({});
+        setExpandedNodes({});
+        setTreeChildren({});
+        setLoadingNodes({});
+        setObjects([]);
+        setSelectedItems([]);
+        setSearchQuery('');
+        handleConnect({ endpoint: conn.endpoint, publicEndpoint: conn.publicEndpoint, accessKey: conn.accessKey, secretKey: conn.secretKey }, false);
+    }, [savedConnections, handleConnect, setSearchParams]);
 
     const fetchBuckets = useCallback(async () => {
         if (!s3Client) return;
@@ -402,37 +536,179 @@ function App() {
         }
     }, [s3Client, showAlert]);
 
-     const handleFileUpload = async (files) => {
-        if (!s3Client || !selectedBucket || !files.length) return;
+    // --- Sidebar folder tree (Finder-style) ---
+    // A node is identified by `${bucket} ${prefix}`; prefix '' is the bucket root.
+    // We keep refs mirroring the children/loading state so loadNode can read the
+    // latest values synchronously without re-creating itself on every change.
+    useEffect(() => { treeChildrenRef.current = treeChildren; }, [treeChildren]);
+    useEffect(() => { loadingNodesRef.current = loadingNodes; }, [loadingNodes]);
 
-        for (const file of files) {
-            const uploadId = `${file.name}-${Date.now()}`;
-            const key = `${prefix}${file.name}`;
-            
-            setUploadingFiles(prev => [...prev, { id: uploadId, name: file.name, progress: 0 }]);
-            
-            try {
-                const parallelUploads3 = new Upload({
-                    client: s3Client,
-                    params: { Bucket: selectedBucket, Key: key, Body: file },
-                });
+    const nodeId = (bucket, nodePrefix) => `${bucket}\u0000${nodePrefix}`;
 
-                parallelUploads3.on("httpUploadProgress", (progress) => {
-                     const percent = progress.total ? Math.round((progress.loaded / progress.total) * 100) : 0;
-                     setUploadingFiles(prev => prev.map(f => f.id === uploadId ? { ...f, progress: percent } : f));
-                });
-
-                await parallelUploads3.done();
-                showAlert(`File "${file.name}" uploaded successfully.`, 'success');
-                fetchObjects(selectedBucket, prefix);
-            } catch (err) {
-                showAlert(`Failed to upload "${file.name}".`, 'error');
-            } finally {
-                setUploadingFiles(prev => prev.filter(f => f.id !== uploadId));
-            }
+    const loadNode = useCallback(async (bucket, nodePrefix, force = false) => {
+        if (!s3Client) return;
+        const id = nodeId(bucket, nodePrefix);
+        if (!force && (treeChildrenRef.current[id] || loadingNodesRef.current[id])) return;
+        loadingNodesRef.current[id] = true;
+        setLoadingNodes(prev => ({ ...prev, [id]: true }));
+        try {
+            const resp = await s3Client.send(new ListObjectsV2Command({ Bucket: bucket, Prefix: nodePrefix, Delimiter: '/' }));
+            const folders = (resp.CommonPrefixes || []).map(p => ({ key: p.Prefix, name: p.Prefix.slice(nodePrefix.length).replace(/\/$/, '') }));
+            setTreeChildren(prev => ({ ...prev, [id]: folders }));
+        } catch (error) {
+            setTreeChildren(prev => ({ ...prev, [id]: [] }));
+        } finally {
+            setLoadingNodes(prev => { const n = { ...prev }; delete n[id]; return n; });
         }
-    };
-    
+    }, [s3Client]);
+
+    const toggleNode = useCallback((bucket, nodePrefix) => {
+        const id = nodeId(bucket, nodePrefix);
+        setExpandedNodes(prev => {
+            const next = { ...prev };
+            if (next[id]) delete next[id];
+            else { next[id] = true; loadNode(bucket, nodePrefix); }
+            return next;
+        });
+    }, [loadNode]);
+
+    const navigateTo = useCallback((bucket, nodePrefix) => {
+        setSearchParams(nodePrefix ? { bucket, prefix: nodePrefix } : { bucket });
+    }, [setSearchParams]);
+
+    // Re-fetches children for every currently expanded node so the tree stays in
+    // sync after a mutation (move, rename, delete, create folder, upload).
+    const refreshTree = useCallback(() => {
+        Object.keys(expandedNodes).forEach(id => {
+            if (!expandedNodes[id]) return;
+            const sep = id.indexOf('\u0000');
+            loadNode(id.slice(0, sep), id.slice(sep + 1), true);
+        });
+    }, [expandedNodes, loadNode]);
+
+    // Auto-expand the tree along the path of the bucket/prefix currently in view.
+    useEffect(() => {
+        if (!s3Client || !selectedBucket) return;
+        const segments = prefix.split('/').filter(Boolean);
+        const prefixes = [''];
+        let acc = '';
+        for (const seg of segments) { acc += `${seg}/`; prefixes.push(acc); }
+        setExpandedNodes(prev => {
+            const next = { ...prev };
+            prefixes.forEach(p => { next[nodeId(selectedBucket, p)] = true; });
+            return next;
+        });
+        prefixes.forEach(p => loadNode(selectedBucket, p));
+    }, [s3Client, selectedBucket, prefix, loadNode]);
+
+    // Uploads a flat list of { file, path } entries. `path` is relative to
+    // `targetPrefix` and may contain slashes, preserving folder structure.
+    const uploadEntries = useCallback(async (entries, targetBucket = selectedBucket, targetPrefix = prefix) => {
+        if (!s3Client || !targetBucket || !entries.length) return;
+
+        const queue = entries
+            .filter(e => e.file && e.path)
+            .map((e, i) => ({ ...e, id: `${e.path}-${Date.now()}-${i}` }));
+        if (!queue.length) return;
+
+        setUploadingFiles(prev => [...prev, ...queue.map(q => ({ id: q.id, name: q.path, progress: 0 }))]);
+
+        let successCount = 0;
+        let failCount = 0;
+
+        const uploadOne = async ({ file, path, id }) => {
+            const key = `${targetPrefix}${path}`;
+            try {
+                const parallelUpload = new Upload({
+                    client: s3Client,
+                    params: { Bucket: targetBucket, Key: key, Body: file },
+                });
+                parallelUpload.on("httpUploadProgress", (progress) => {
+                    const percent = progress.total ? Math.round((progress.loaded / progress.total) * 100) : 0;
+                    setUploadingFiles(prev => prev.map(f => f.id === id ? { ...f, progress: percent } : f));
+                });
+                await parallelUpload.done();
+                successCount++;
+            } catch (err) {
+                failCount++;
+            } finally {
+                setUploadingFiles(prev => prev.filter(f => f.id !== id));
+            }
+        };
+
+        // Upload with a small concurrency pool to keep the UI responsive.
+        const CONCURRENCY = 4;
+        let next = 0;
+        const worker = async () => {
+            while (next < queue.length) {
+                await uploadOne(queue[next++]);
+            }
+        };
+        await Promise.all(Array.from({ length: Math.min(CONCURRENCY, queue.length) }, worker));
+
+        if (successCount) showAlert(`${successCount} file(s) uploaded successfully.`, 'success');
+        if (failCount) showAlert(`${failCount} file(s) failed to upload.`, 'error');
+        if (targetBucket === selectedBucket && targetPrefix === prefix) {
+            fetchObjects(selectedBucket, prefix);
+        }
+        refreshTree();
+    }, [s3Client, selectedBucket, prefix, showAlert, fetchObjects, refreshTree]);
+
+    // Maps a FileList from an <input> into upload entries. When `useRelativePath`
+    // is set (folder picker), the browser-provided webkitRelativePath preserves
+    // the selected folder's directory structure.
+    const handleInputUpload = useCallback((fileList, useRelativePath) => {
+        const entries = Array.from(fileList || []).map(file => ({
+            file,
+            path: useRelativePath ? (file.webkitRelativePath || file.name) : file.name,
+        }));
+        uploadEntries(entries);
+    }, [uploadEntries]);
+
+    // --- Drag & drop upload from the OS ---
+    // We only react to external file drags (types include 'Files'); internal
+    // row drags used for moving items don't carry the 'Files' type.
+    const isFileDrag = (e) => Array.from(e.dataTransfer?.types || []).includes('Files');
+
+    const handleDragEnter = useCallback((e) => {
+        if (!selectedBucket || !isFileDrag(e)) return;
+        e.preventDefault();
+        dragCounter.current++;
+        setIsDraggingFiles(true);
+    }, [selectedBucket]);
+
+    const handleDragOver = useCallback((e) => {
+        if (!selectedBucket || !isFileDrag(e)) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'copy';
+    }, [selectedBucket]);
+
+    const handleDragLeave = useCallback((e) => {
+        if (!isFileDrag(e)) return;
+        dragCounter.current--;
+        if (dragCounter.current <= 0) {
+            dragCounter.current = 0;
+            setIsDraggingFiles(false);
+        }
+    }, []);
+
+    const handleExternalDrop = useCallback(async (e) => {
+        if (!isFileDrag(e)) return;
+        e.preventDefault();
+        dragCounter.current = 0;
+        setIsDraggingFiles(false);
+        if (!selectedBucket) {
+            showAlert('Select a bucket before uploading.', 'error');
+            return;
+        }
+        try {
+            const entries = await getEntriesFromDataTransfer(e.dataTransfer);
+            if (entries.length) uploadEntries(entries);
+        } catch (err) {
+            showAlert('Could not read the dropped items.', 'error');
+        }
+    }, [selectedBucket, showAlert, uploadEntries]);
+
     const handleDeleteSelected = async () => {
         if (!s3Client || !selectedBucket || selectedItems.length === 0) return;
 
@@ -471,28 +747,29 @@ function App() {
         } finally {
             setIsDeleteModalOpen(false);
             fetchObjects(selectedBucket, prefix);
+            refreshTree();
         }
     };
 
-    const collectAllKeysInPrefix = useCallback(async (prefixToScan) => {
+    const collectAllKeysInPrefix = useCallback(async (prefixToScan, bucket = selectedBucket) => {
         let keys = [];
         let continuationToken;
         do {
-            const resp = await s3Client.send(new ListObjectsV2Command({ Bucket: selectedBucket, Prefix: prefixToScan, ContinuationToken: continuationToken }));
+            const resp = await s3Client.send(new ListObjectsV2Command({ Bucket: bucket, Prefix: prefixToScan, ContinuationToken: continuationToken }));
             if (resp.Contents) keys.push(...resp.Contents.map(c => c.Key));
             continuationToken = resp.NextContinuationToken;
         } while (continuationToken);
         return keys;
     }, [s3Client, selectedBucket]);
 
-    const batchDeleteKeys = useCallback(async (keys) => {
+    const batchDeleteKeys = useCallback(async (keys, bucket = selectedBucket) => {
         // S3 DeleteObjectsCommand supports max 1000 objects per request
         const BATCH_SIZE = 1000;
         for (let i = 0; i < keys.length; i += BATCH_SIZE) {
             const batch = keys.slice(i, i + BATCH_SIZE);
-            await s3Client.send(new DeleteObjectsCommand({ 
-                Bucket: selectedBucket, 
-                Delete: { Objects: batch.map(Key => ({ Key })) } 
+            await s3Client.send(new DeleteObjectsCommand({
+                Bucket: bucket,
+                Delete: { Objects: batch.map(Key => ({ Key })) }
             }));
         }
     }, [s3Client, selectedBucket]);
@@ -507,8 +784,9 @@ function App() {
             showAlert('Failed to delete.', 'error');
         } finally {
             fetchObjects(selectedBucket, prefix);
+            refreshTree();
         }
-    }, [selectedBucket, prefix, collectAllKeysInPrefix, batchDeleteKeys, showAlert, fetchObjects]);
+    }, [selectedBucket, prefix, collectAllKeysInPrefix, batchDeleteKeys, showAlert, fetchObjects, refreshTree]);
 
     const openRenameModal = useCallback((obj) => {
         const currentName = obj.Key.replace(prefix, '').replace(/\/$/, '');
@@ -545,30 +823,35 @@ function App() {
             showAlert(`Renamed to "${trimmedName}" successfully.`, 'success');
             setIsRenameModalOpen(false);
             fetchObjects(selectedBucket, prefix);
+            refreshTree();
         } catch (error) {
             showAlert('Failed to rename.', 'error');
         }
-    }, [s3Client, selectedBucket, prefix, renameTarget, renameValue, collectAllKeysInPrefix, batchDeleteKeys, showAlert, fetchObjects]);
+    }, [s3Client, selectedBucket, prefix, renameTarget, renameValue, collectAllKeysInPrefix, batchDeleteKeys, showAlert, fetchObjects, refreshTree]);
 
-    const handleMoveItem = useCallback(async (sourceKey, targetFolderKey) => {
+    // Moves a file/folder into targetFolderKey. The source always lives in the
+    // currently selected bucket; targetBucket may differ to support moving across
+    // buckets via the sidebar tree.
+    const handleMoveItem = useCallback(async (sourceKey, targetFolderKey, targetBucket = selectedBucket) => {
         const isFolder = sourceKey.endsWith('/');
         const parts = sourceKey.replace(/\/$/, '').split('/');
         const name = parts[parts.length - 1];
         const newKey = isFolder ? `${targetFolderKey}${name}/` : `${targetFolderKey}${name}`;
-        if (sourceKey === newKey) return;
-        if (isFolder && newKey.startsWith(sourceKey)) {
+        const sameBucket = targetBucket === selectedBucket;
+        if (sameBucket && sourceKey === newKey) return;
+        if (sameBucket && isFolder && newKey.startsWith(sourceKey)) {
             showAlert('Cannot move a folder into itself.', 'error');
             return;
         }
         try {
             if (!isFolder) {
-                await s3Client.send(new CopyObjectCommand({ Bucket: selectedBucket, CopySource: encodeCopySource(selectedBucket, sourceKey), Key: newKey }));
+                await s3Client.send(new CopyObjectCommand({ Bucket: targetBucket, CopySource: encodeCopySource(selectedBucket, sourceKey), Key: newKey }));
                 await s3Client.send(new DeleteObjectsCommand({ Bucket: selectedBucket, Delete: { Objects: [{ Key: sourceKey }] } }));
             } else {
                 const keys = await collectAllKeysInPrefix(sourceKey);
                 for (const k of keys) {
                     const destKey = newKey + k.slice(sourceKey.length);
-                    await s3Client.send(new CopyObjectCommand({ Bucket: selectedBucket, CopySource: encodeCopySource(selectedBucket, k), Key: destKey }));
+                    await s3Client.send(new CopyObjectCommand({ Bucket: targetBucket, CopySource: encodeCopySource(selectedBucket, k), Key: destKey }));
                 }
                 if (keys.length > 0) {
                     await batchDeleteKeys(keys);
@@ -576,10 +859,78 @@ function App() {
             }
             showAlert('Moved successfully.', 'success');
             fetchObjects(selectedBucket, prefix);
+            refreshTree();
         } catch (error) {
             showAlert('Failed to move item.', 'error');
         }
-    }, [s3Client, selectedBucket, prefix, collectAllKeysInPrefix, batchDeleteKeys, showAlert, fetchObjects]);
+    }, [s3Client, selectedBucket, prefix, collectAllKeysInPrefix, batchDeleteKeys, showAlert, fetchObjects, refreshTree]);
+
+    // Drop onto a sidebar tree node: move the dragged item there, or upload
+    // dropped OS files/folders into that node's bucket/prefix.
+    const handleNodeDragOver = useCallback((e, id) => {
+        const external = isFileDrag(e);
+        if (!external && !draggedKeyRef.current) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = external ? 'copy' : 'move';
+        setTreeDropTarget(id);
+    }, []);
+
+    const handleNodeDragLeave = useCallback((id) => {
+        setTreeDropTarget(prev => prev === id ? null : prev);
+    }, []);
+
+    const handleNodeDrop = useCallback(async (e, bucket, nodePrefix) => {
+        const external = isFileDrag(e);
+        if (!external && !draggedKeyRef.current) return;
+        e.preventDefault();
+        e.stopPropagation();
+        setTreeDropTarget(null);
+        if (external) {
+            try {
+                const entries = await getEntriesFromDataTransfer(e.dataTransfer);
+                if (entries.length) uploadEntries(entries, bucket, nodePrefix);
+            } catch (err) {
+                showAlert('Could not read the dropped items.', 'error');
+            }
+            return;
+        }
+        const src = draggedKeyRef.current;
+        draggedKeyRef.current = null;
+        setDraggedKey(null);
+        if (src) handleMoveItem(src, nodePrefix, bucket);
+    }, [uploadEntries, handleMoveItem, showAlert]);
+
+    // Copies the public URL of a tree node (bucket root or folder).
+    const handleCopyNodeUrl = useCallback(async (bucket, nodePrefix) => {
+        const url = getPublicUrl(publicEndpoint, bucket, nodePrefix);
+        try {
+            await navigator.clipboard.writeText(url);
+            showAlert('Public URL copied to clipboard.', 'success');
+        } catch (err) {
+            showAlert('Failed to copy URL.', 'error');
+        }
+    }, [publicEndpoint, showAlert]);
+
+    // Deletes a folder node and everything under it (confirmed via modal).
+    const handleDeleteNode = useCallback(async (bucket, nodePrefix) => {
+        try {
+            const keys = await collectAllKeysInPrefix(nodePrefix, bucket);
+            if (keys.length > 0) await batchDeleteKeys(keys, bucket);
+            showAlert('Folder deleted successfully.', 'success');
+        } catch (error) {
+            showAlert('Failed to delete folder.', 'error');
+        } finally {
+            // If we deleted the folder currently in view (or an ancestor of it),
+            // navigate up to the closest still-existing parent.
+            if (bucket === selectedBucket && (prefix === nodePrefix || prefix.startsWith(nodePrefix))) {
+                const parent = nodePrefix.replace(/[^/]+\/$/, '');
+                setSearchParams(parent ? { bucket, prefix: parent } : { bucket });
+            } else if (bucket === selectedBucket) {
+                fetchObjects(selectedBucket, prefix);
+            }
+            refreshTree();
+        }
+    }, [collectAllKeysInPrefix, batchDeleteKeys, showAlert, selectedBucket, prefix, setSearchParams, fetchObjects, refreshTree]);
 
     const handleCreateFolder = useCallback(async () => {
         const trimmedName = newFolderName.trim();
@@ -598,10 +949,11 @@ function App() {
             setIsCreateFolderModalOpen(false);
             setNewFolderName('');
             fetchObjects(selectedBucket, prefix);
+            refreshTree();
         } catch (error) {
             showAlert(`Failed to create folder "${trimmedName}".`, 'error');
         }
-    }, [s3Client, selectedBucket, prefix, newFolderName, showAlert, fetchObjects]);
+    }, [s3Client, selectedBucket, prefix, newFolderName, showAlert, fetchObjects, refreshTree]);
 
     const handleDownload = async (key) => {        if (!s3Client || !selectedBucket) return;
         try {
@@ -655,16 +1007,51 @@ function App() {
     
     const breadcrumbs = ['Buckets', selectedBucket, ...prefix.split('/').filter(Boolean)];
 
+    const treeCtx = {
+        selectedBucket,
+        currentPrefix: prefix,
+        expandedNodes,
+        treeChildren,
+        loadingNodes,
+        treeDropTarget,
+        openMenuId: openTreeMenuId,
+        onToggle: toggleNode,
+        onNavigate: navigateTo,
+        onNodeDragOver: handleNodeDragOver,
+        onNodeDragLeave: handleNodeDragLeave,
+        onNodeDrop: handleNodeDrop,
+        onMenuToggle: (id) => setOpenTreeMenuId(prev => prev === id ? null : id),
+        onMenuClose: () => setOpenTreeMenuId(null),
+        onCopyUrl: handleCopyNodeUrl,
+        onDelete: (bucket, nodePrefix, name) => setTreeDeleteTarget({ bucket, prefix: nodePrefix, name }),
+    };
+
     return (
         <div className="h-screen w-screen bg-slate-900 text-slate-300 flex flex-col font-sans overflow-hidden">
             <Alert message={alertData?.message} type={alertData?.type} onDismiss={hideAlert} />
             <header className="flex-shrink-0 bg-slate-800/50 border-b border-slate-700 p-2 flex items-center justify-between">
-                <div className="flex items-center space-x-2">
+                <button
+                    onClick={handleDisconnect}
+                    title="Back to connections"
+                    className="flex items-center space-x-2 rounded-md px-2 py-1 hover:bg-slate-700/60 transition-colors"
+                >
                     <HardDrive className="h-6 w-6 text-sky-400" />
                     <span className="font-semibold text-lg text-slate-100">Minio Explorer</span>
-                </div>
+                </button>
                 <div className="flex items-center space-x-4">
-                    <span className="text-sm text-slate-400">Connected</span>
+                    {savedConnections.length > 0 && (
+                        <select
+                            value={activeConnectionId ?? ''}
+                            onChange={(e) => { if (e.target.value) handleSwitchConnection(Number(e.target.value)); }}
+                            title="Switch connection"
+                            className="bg-slate-900 border border-slate-700 rounded-md px-3 py-1.5 text-sm text-slate-200 focus:ring-2 focus:ring-sky-500 focus:border-sky-500 outline-none transition max-w-[12rem]"
+                        >
+                            {activeConnectionId === null && <option value="">Current (unsaved)</option>}
+                            {savedConnections.map(conn => (
+                                <option key={conn.id} value={conn.id}>{conn.name}</option>
+                            ))}
+                        </select>
+                    )}
                     <button onClick={handleDisconnect} className="flex items-center space-x-2 bg-red-600 hover:bg-red-700 text-white font-bold py-1.5 px-3 rounded-md transition-colors">
                         <Power size={16} />
                         <span>Disconnect</span>
@@ -679,19 +1066,37 @@ function App() {
                     {isLoadingBuckets ? (
                         <div className="flex-grow flex items-center justify-center"><Loader2 className="animate-spin text-slate-500" size={32}/></div>
                     ) : (
-                        <ul className="space-y-1 overflow-y-auto">
+                        <ul className="space-y-0.5 overflow-y-auto flex-grow">
                             {buckets.map(bucket => (
-                                <li key={bucket.Name}>
-                                    <button onClick={() => setSearchParams({ bucket: bucket.Name })} className={`flex items-center space-x-3 p-2 rounded-md transition-colors w-full text-left ${selectedBucket === bucket.Name ? 'bg-sky-500/20 text-sky-300' : 'hover:bg-slate-700/50'}`}>
-                                        <Folder size={18} className={`${selectedBucket === bucket.Name ? 'text-sky-400' : 'text-slate-500'}`} />
-                                        <span className="truncate flex-1">{bucket.Name}</span>
-                                    </button>
-                                </li>
+                                <TreeNode
+                                    key={bucket.Name}
+                                    ctx={treeCtx}
+                                    bucket={bucket.Name}
+                                    nodePrefix=""
+                                    label={bucket.Name}
+                                    depth={0}
+                                    isBucket
+                                />
                             ))}
                         </ul>
                     )}
                 </aside>
-                <main className="flex-1 flex flex-col bg-slate-900 min-w-0">
+                <main
+                    className="relative flex-1 flex flex-col bg-slate-900 min-w-0"
+                    onDragEnter={handleDragEnter}
+                    onDragOver={handleDragOver}
+                    onDragLeave={handleDragLeave}
+                    onDrop={handleExternalDrop}
+                >
+                    {isDraggingFiles && (
+                        <div className="absolute inset-0 z-20 m-2 rounded-xl border-2 border-dashed border-sky-400 bg-sky-500/10 backdrop-blur-sm flex items-center justify-center pointer-events-none">
+                            <div className="text-center">
+                                <UploadIcon className="mx-auto h-12 w-12 text-sky-400 mb-3" />
+                                <p className="text-lg font-semibold text-sky-200">Drop files or folders to upload</p>
+                                <p className="text-sm text-slate-400 mt-1">to {selectedBucket}/{prefix}</p>
+                            </div>
+                        </div>
+                    )}
                     <div className="flex-shrink-0 p-3 bg-slate-800/30 border-b border-slate-700 flex items-center justify-between gap-4">
                         <div className="flex-grow flex items-center text-sm text-slate-400 overflow-x-auto whitespace-nowrap">
                            {breadcrumbs.map((crumb, i) => (
@@ -729,10 +1134,15 @@ function App() {
                                    <Plus size={16} />
                                    <span>New Folder</span>
                                </button>
+                               <label className="bg-slate-600 hover:bg-slate-500 text-white font-bold py-1.5 px-3 rounded-md transition-colors cursor-pointer flex items-center space-x-2">
+                                 <FolderUp size={16} />
+                                 <span>Upload Folder</span>
+                                 <input type="file" webkitdirectory="" directory="" multiple className="hidden" onChange={(e) => { handleInputUpload(e.target.files, true); e.target.value = ''; }} />
+                               </label>
                                <label className="bg-sky-600 hover:bg-sky-700 text-white font-bold py-1.5 px-3 rounded-md transition-colors cursor-pointer flex items-center space-x-2">
                                  <UploadIcon size={16} />
                                  <span>Upload</span>
-                                 <input type="file" multiple className="hidden" onChange={(e) => handleFileUpload(e.target.files)} />
+                                 <input type="file" multiple className="hidden" onChange={(e) => { handleInputUpload(e.target.files, false); e.target.value = ''; }} />
                                </label>
                                </>
                            )}
@@ -774,9 +1184,10 @@ function App() {
                                             setDraggedKey(null);
                                             setDropTargetKey(null);
                                         }}
-                                        onDragOver={obj.isFolder ? (e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; setDropTargetKey(obj.Key); } : undefined}
+                                        onDragOver={obj.isFolder ? (e) => { if (isFileDrag(e)) { return; } e.preventDefault(); e.dataTransfer.dropEffect = 'move'; setDropTargetKey(obj.Key); } : undefined}
                                         onDragLeave={obj.isFolder ? () => setDropTargetKey(prev => prev === obj.Key ? null : prev) : undefined}
                                         onDrop={obj.isFolder ? (e) => {
+                                            if (isFileDrag(e)) return;
                                             e.preventDefault();
                                             const src = draggedKeyRef.current;
                                             if (src && src !== obj.Key && !src.startsWith(obj.Key)) {
@@ -887,6 +1298,45 @@ function App() {
                     </div>
                 </div>
             </Modal>
+            <Modal isOpen={!!treeDeleteTarget} onClose={() => setTreeDeleteTarget(null)} title="Confirm Deletion">
+                <div className="text-slate-300">
+                    <p className="mb-4">
+                        Are you sure you want to permanently delete the folder <span className="font-semibold text-slate-100">&quot;{treeDeleteTarget?.name}&quot;</span> and all of its contents? This action cannot be undone.
+                    </p>
+                    <p className="text-xs text-slate-500 mb-6 truncate">{treeDeleteTarget?.bucket} / {treeDeleteTarget?.prefix}</p>
+                    <div className="mt-6 flex justify-end space-x-3">
+                        <button type="button" onClick={() => setTreeDeleteTarget(null)} className="px-4 py-2 rounded-md bg-slate-700 hover:bg-slate-600 text-slate-100 font-semibold transition">Cancel</button>
+                        <button
+                            type="button"
+                            onClick={() => { const t = treeDeleteTarget; setTreeDeleteTarget(null); handleDeleteNode(t.bucket, t.prefix); }}
+                            className="px-4 py-2 rounded-md bg-red-600 hover:bg-red-700 text-white font-semibold transition"
+                        >
+                            Delete
+                        </button>
+                    </div>
+                </div>
+            </Modal>
+            {uploadingFiles.length > 0 && (
+                <div className="fixed bottom-5 right-5 z-50 w-80 max-w-[90vw] bg-slate-800 border border-slate-700 rounded-lg shadow-2xl overflow-hidden">
+                    <div className="px-4 py-2.5 border-b border-slate-700 flex items-center space-x-2">
+                        <Loader2 className="animate-spin h-4 w-4 text-sky-400" />
+                        <span className="text-sm font-semibold text-slate-100">Uploading {uploadingFiles.length} file(s)…</span>
+                    </div>
+                    <ul className="max-h-60 overflow-y-auto p-3 space-y-2.5">
+                        {uploadingFiles.map(f => (
+                            <li key={f.id}>
+                                <div className="flex items-center justify-between text-xs text-slate-300 mb-1">
+                                    <span className="truncate pr-2">{f.name}</span>
+                                    <span className="flex-shrink-0 text-slate-400">{f.progress}%</span>
+                                </div>
+                                <div className="h-1.5 w-full bg-slate-700 rounded-full overflow-hidden">
+                                    <div className="h-full bg-sky-500 transition-all duration-200" style={{ width: `${f.progress}%` }} />
+                                </div>
+                            </li>
+                        ))}
+                    </ul>
+                </div>
+            )}
             <FilePreviewModal item={previewItem} objectUrl={previewObjectUrl} isLoading={isLoadingPreview} onClose={closePreview} />
         </div>
     );
