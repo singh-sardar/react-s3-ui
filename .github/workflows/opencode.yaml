@@ -29,4 +29,3 @@ jobs:
           model: openrouter/free
           # model: anthropic/claude-sonnet-4-20250514
           # share: true
-          # github_token: xxxx
